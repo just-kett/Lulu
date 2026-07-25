@@ -8,6 +8,8 @@ import os
 from llm import ask_llm
 from data import ban, roles
 
+import server
+
 load_dotenv()
 bot_token = os.getenv("TOKEN")
 handler = logging.FileHandler(filename="bot.log", encoding="utf-8", mode="w")
@@ -64,4 +66,5 @@ async def ask(ctx, *, prompt):
     )
     await ctx.reply(answer)
 
+server.keep_alive()
 bot.run(token=bot_token, log_handler=handler, log_level=logging.DEBUG)
