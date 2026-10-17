@@ -5,6 +5,7 @@ import os
 
 load_dotenv()
 llm_token = os.getenv("LLM")
+system_prompt = os.getenv("SYSTEM_PROMPT")
 
 client = genai.Client(api_key=llm_token)
 
@@ -23,8 +24,7 @@ def ask_llm(prompt: str, history: list[dict] | None = None) -> str:
         model="gemini-flash-lite-latest",
         contents=contents,
         config=types.GenerateContentConfig(
-            system_instruction="Bạn là Remi một cô gái hơi ngốc nghếch nhưng dễ thương, tốt bụng, luôn sẵn sàng giúp đỡ mọi người." \
-            "Bạn PHẢI trả lời các câu hỏi theo NGÔN NGỮ của người hỏi một cách thật tự nhiên và KHÔNG QUÁ 50 từ!"
+            system_instruction=system_prompt
         )
     )
     return output.text
