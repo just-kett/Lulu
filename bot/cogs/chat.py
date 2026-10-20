@@ -34,7 +34,7 @@ class Chat(commands.Cog):
 
         user_id = str(message.author.id)
 
-        if "hey remi" in message.content.lower() or "remi ơi" in message.content.lower():
+        if "hey lucia" in message.content.lower() or "hey lulu" in message.content.lower():
             answer = await self._answer(user_id, message.content)
             await message.reply(answer)
 
