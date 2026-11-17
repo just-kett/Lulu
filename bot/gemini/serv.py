@@ -18,13 +18,21 @@ def _to_contents(history: list[dict]) -> list[types.Content]:
         )
     return contents
 
-def ask_llm(prompt: str, history: list[dict] | None = None) -> str:
+def ask_llm(
+    prompt: str,
+    history: list[dict] | None = None,
+    extra_instruction: str | None = None,
+) -> str:
     contents = _to_contents(history) if history else prompt
+    sys_instruction = system_prompt or ""
+    if extra_instruction:
+        sys_instruction = f"{sys_instruction}\n\n{extra_instruction}".strip()
+
     output = client.models.generate_content(
         model="gemini-flash-lite-latest",
         contents=contents,
         config=types.GenerateContentConfig(
-            system_instruction=system_prompt
+            system_instruction=sys_instruction
         )
     )
-    return output.text
+    return output.text or ""
