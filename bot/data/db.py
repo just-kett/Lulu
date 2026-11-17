@@ -59,4 +59,4 @@ def load_history(user_id: str) -> list[dict]:
 
 def clear_history(user_id: str) -> None:
     with psycopg.connect(DATABASE_URL) as conn:
-        conn.execute("DELETE FROM messages WHERE user_id = %s", (user_id))
+        conn.execute("DELETE FROM messages WHERE user_id = %s", (user_id,))

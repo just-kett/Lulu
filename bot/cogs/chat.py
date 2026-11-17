@@ -58,6 +58,11 @@ class Chat(commands.Cog):
     async def ask(self, ctx, *, content: str):
         answer = await self._answer(str(ctx.author.id), content)
         await ctx.reply(answer)
+
+    @commands.command(name='clear', aliases=['cleardata', 'reset'])
+    async def clear_data(self, ctx):
+        await asyncio.to_thread(db.clear_history, str(ctx.author.id))
+        await ctx.reply("🧹 Lịch sử trò chuyện của bạn đã được xóa khỏi hệ thống. / Your conversation history has been cleared from our database.")
     
 async def setup(bot):
     await bot.add_cog(Chat(bot))

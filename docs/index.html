@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>REMI Discord Bot - Legal Information</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --card-bg: #181b24;
+      --text: #e1e7ec;
+      --text-muted: #9aa5b1;
+      --accent: #5865F2;
+      --accent-hover: #4752c4;
+      --border: #2a2f3d;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      margin: 0;
+      padding: 40px 20px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 80vh;
+    }
+    .container {
+      max-width: 650px;
+      width: 100%;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 40px 32px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+      text-align: center;
+    }
+    .badge {
+      display: inline-block;
+      padding: 4px 12px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #fff;
+      background-color: var(--accent);
+      border-radius: 20px;
+      margin-bottom: 16px;
+    }
+    h1 {
+      margin: 0 0 12px 0;
+      font-size: 2rem;
+    }
+    p {
+      color: var(--text-muted);
+      margin-bottom: 30px;
+    }
+    .links-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-top: 24px;
+    }
+    @media (max-width: 500px) {
+      .links-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    .card-link {
+      display: block;
+      padding: 20px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      text-decoration: none;
+      transition: all 0.2s ease;
+      font-weight: 600;
+      font-size: 1.1rem;
+    }
+    .card-link:hover {
+      border-color: var(--accent);
+      color: #fff;
+      background-color: #1f2330;
+      transform: translateY(-2px);
+    }
+    .card-link span {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 400;
+      color: var(--text-muted);
+      margin-top: 6px;
+    }
+    .footer {
+      margin-top: 36px;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border);
+      padding-top: 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="badge">REMI AI Bot</div>
+    <h1>Legal & Policy Information</h1>
+    <p>Welcome to REMI. Please review our legal documentation, terms of service, and privacy practices below.</p>
+    
+    <div class="links-grid">
+      <a href="terms.html" class="card-link">
+        Terms of Service
+        <span>Rules and guidelines for interacting with REMI</span>
+      </a>
+      <a href="privacy.html" class="card-link">
+        Privacy Policy
+        <span>How we handle and protect user data</span>
+      </a>
+    </div>
+
+    <div class="footer">
+      Powered by Google Gemini & Discord.py &bull; <a href="https://github.com/just-kett/REMI" style="color: var(--accent); text-decoration: none;">GitHub Repository</a>
+    </div>
+  </div>
+</body>
+</html>
