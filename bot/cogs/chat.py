@@ -39,7 +39,6 @@ class Chat(commands.Cog):
         if not usable:
             return None, {}, {}
 
-        # Giới hạn tối đa 50 emote để không làm phình prompt
         usable = usable[:50]
         emoji_lookup = {e.name.lower(): e for e in usable}
         emoji_mention_map = {e.name.lower(): str(e) for e in usable}
@@ -77,7 +76,6 @@ class Chat(commands.Cog):
                 extra_instruction=instruction
             )
 
-        # 1. Trích xuất tag [REACT: emote_name] nếu có
         react_emoji = None
         react_match = re.search(r'\[REACT:\s*([^\]]+)\]', raw_answer, re.IGNORECASE)
         if react_match:
@@ -90,7 +88,6 @@ class Chat(commands.Cog):
             else:
                 react_emoji = raw_react
 
-        # 2. Format custom emote trong văn bản: :name: -> <:name:id>
         if emoji_mention_map:
             formatted_answer = re.sub(
                 r'(?<!<)(?<!<a):([a-zA-Z0-9_]+):(?!\d+>)',
@@ -100,13 +97,10 @@ class Chat(commands.Cog):
         else:
             formatted_answer = raw_answer
 
-        # 3. Lưu câu trả lời sạch vào cơ sở dữ liệu
         await asyncio.to_thread(db.save_message, user_id, "remi", formatted_answer)
 
-        # 4. Gửi tin nhắn trả lời
         await message.reply(formatted_answer)
 
-        # 5. Thả reaction vào tin nhắn người dùng (nếu có emote phù hợp)
         if react_emoji:
             try:
                 await message.add_reaction(react_emoji)
