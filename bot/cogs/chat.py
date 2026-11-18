@@ -84,7 +84,7 @@ class Chat(commands.Cog):
         )
         return instruction, emoji_lookup, emoji_mention_map
 
-    async def _get_channel_recent_context(self, message: discord.Message, limit: int = 4) -> str:
+    async def _get_channel_recent_context(self, message: discord.Message, limit: int = 50) -> str:
         """Lấy các tin nhắn vừa diễn ra trong kênh ngay trước khi bot được gọi để nắm bắt tình hình phòng chat."""
         if not message.guild or not hasattr(message.channel, "history"):
             return ""
@@ -92,7 +92,7 @@ class Chat(commands.Cog):
         recent_chats = []
         try:
             async for prev_msg in message.channel.history(limit=limit, before=message):
-                if prev_msg.author == self.bot.user:
+                if getattr(prev_msg.author, "bot", False) or prev_msg.author == self.bot.user:
                     continue
                 content = prev_msg.clean_content.strip()
                 if content and not content.startswith(("!", "/", ".")):
@@ -259,7 +259,7 @@ class Chat(commands.Cog):
                     if len(final_notes) > 250 or final_notes.count('|') >= 4:
                         asyncio.create_task(self._condense_user_memory(author_id, author_name, final_notes))
 
-        channel_recent_text = await self._get_channel_recent_context(message, limit=10)
+        channel_recent_text = await self._get_channel_recent_context(message, limit=50)
 
         emoji_guild = self._get_emoji_source_guild(message.guild)
         emoji_instruction, emoji_lookup, emoji_mention_map = self._get_server_emojis_context(emoji_guild)
