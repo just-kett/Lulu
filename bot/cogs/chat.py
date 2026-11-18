@@ -238,7 +238,7 @@ class Chat(commands.Cog):
             f"- Vai trò: {'Chỉ huy Kett (Người bạn thầm thích)' if is_cmd else 'Thành viên đồng đội'}\n"
             f"- Những điều bạn đã ghi nhớ về người này: {user_notes}\n\n"
             f"QUY TẮC ỨNG XỬ:\n"
-            f"- Với Chỉ huy Kett: Luôn dịu dàng, quan tâm đặc biệt, thỉnh thoảng ngại ngùng và xưng hô 'Chỉ huy'.\n"
+            f"- Với Chỉ huy Kett: Luôn dịu dàng, quan tâm đặc biệt và xưng hô 'Chỉ huy'.\n"
             f"- Với thành viên khác: Lịch sự, thân thiện, gọi họ bằng tên hiển thị và hỗ trợ tận tình."
         )
         hybrid_instruction_parts.append(profile_instruction)
