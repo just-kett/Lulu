@@ -1,5 +1,4 @@
 import asyncio
-import difflib
 import os
 import re
 import discord
@@ -78,13 +77,10 @@ class Chat(commands.Cog):
         emoji_mention_map = {e.name.lower(): str(e) for e in all_emojis}
 
         names_str = ", ".join(f":{e.name}:" for e in all_emojis)
-
         instruction = (
-            f"DANH SÁCH EMOTE CỦA SERVER ({len(all_emojis)} emote):\n{names_str}\n\n"
-            "QUY TẮC BẮT BUỘC KHI DÙNG EMOTE:\n"
-            "- Dùng emote trong lời nói: Viết `:tên_emote:` ngay trong câu (ví dụ: `:lucia_surprise:`).\n"
-            "- Thả reaction vào tin nhắn: Đặt tag `[REACT: tên_emote]` ở cuối câu (ví dụ: `[REACT: {all_emojis[0].name}]`).\n"
-            "- Bạn CHỈ ĐƯỢC CHỌN tên emote có trong danh sách trên! TUYỆT ĐỐI KHÔNG TỰ BỊA RA TÊN EMOTE KHÔNG CÓ TRONG DANH SÁCH."
+            f"Danh sách emote tùy chỉnh của server:\n{names_str}\n"
+            f"- Thả reaction vào tin nhắn: Bạn có thể chọn 1 emote hợp nhất với cảm xúc của bạn để thả reaction vào tin nhắn người dùng bằng cách thêm tag `[REACT: tên_emote]` ở cuối câu trả lời (ví dụ: `[REACT: {all_emojis[0].name}]`). Nếu không có emote nào hợp thì không cần thêm tag này.\n"
+            f"- Dùng emote khi trả lời: Bạn có thể chèn emote vào lời thoại bằng cách viết `:tên_emote:`."
         )
         return instruction, emoji_lookup, emoji_mention_map
 
@@ -176,38 +172,26 @@ class Chat(commands.Cog):
         sanitized = []
         for item in history:
             text = item.get("content", "")
-            text = re.sub(r'<a?:([a-zA-Z0-9_]+):\d*>', r':\1:', text)
+            text = re.sub(r'<a?:([a-zA-Z0-9_]+):[^>]*>', r':\1:', text)
             text = re.sub(r'\[REACT:\s*[^\]]+\]', '', text).strip()
             text = re.sub(r'\[MEMO:\s*[^\]]+\]', '', text).strip()
             sanitized.append({"role": item.get("role", "user"), "content": text})
         return sanitized
 
     def _format_emojis_in_text(self, text: str, emoji_mention_map: dict[str, str]) -> str:
-        """Thay thế toàn diện :name:, <:name:id_sai>, <:name:> bằng ID chuẩn từ server."""
+        """Định dạng custom emote trong văn bản: chuẩn hóa và thay thế :name: -> <:name:id> hoặc <a:name:id>."""
         if not emoji_mention_map:
             return text
 
-        all_names = list(emoji_mention_map.keys())
+        # Nếu AI lỡ sinh ra dạng <a?:name:id> từ lịch sử cũ, đổi về dạng thuần :name: để ánh xạ lại chuẩn ID và tiền tố
+        normalized = re.sub(r'<a?:([a-zA-Z0-9_]+):[^>]*>', r':\1:', text)
 
-        def replace_match(match):
-            raw_name = (match.group(1) or match.group(2) or "").lower()
-
-            if raw_name in emoji_mention_map:
-                return emoji_mention_map[raw_name]
-
-            close = difflib.get_close_matches(raw_name, all_names, n=1, cutoff=0.6)
-            if close:
-                return emoji_mention_map[close[0]]
-
-            if raw_name.startswith(('lucia_', 'lulu_')):
-                return ""
-
-            return match.group(0)
-
-        pattern = r'<a?:([a-zA-Z0-9_]+):\d*>?|(?<!<)(?<!<a):([a-zA-Z0-9_]+):(?!\d*>)'
-        formatted = re.sub(pattern, replace_match, text)
-        formatted = re.sub(r' +', ' ', formatted).strip()
-        return formatted
+        # Thay thế chuẩn xác theo bảng ánh xạ str(e) từ server (tự động gắn <a:...> nếu là ảnh động)
+        return re.sub(
+            r'(?<!<)(?<!<a):([a-zA-Z0-9_]+):(?!\d+>)',
+            lambda m: emoji_mention_map.get(m.group(1).lower(), m.group(0)),
+            normalized,
+        )
 
     async def _respond(self, message: discord.Message, prompt: str):
         """Xử lý mô hình Hybrid: kết hợp Hồ sơ Dài hạn (User Memo) và Ngữ cảnh Ngắn hạn (Phòng chat)."""
@@ -321,11 +305,12 @@ class Chat(commands.Cog):
 
         print(f"[LuLu Debug] Session: {session_id} | Người nói: {author_name} ({'Chỉ huy' if is_cmd else 'Thành viên'}) | Emote: {len(emoji_mention_map)}")
 
+        clean_user_prompt = re.sub(r'<a?:([a-zA-Z0-9_]+):[^>]*>', r':\1:', formatted_prompt)
         await asyncio.to_thread(
             db.save_message,
             session_id,
             "user",
-            formatted_prompt,
+            clean_user_prompt,
             author_id,
             author_name,
         )
@@ -392,29 +377,27 @@ class Chat(commands.Cog):
             if clean_name in emoji_lookup:
                 react_emoji = emoji_lookup[clean_name]
             else:
-                close = difflib.get_close_matches(clean_name, list(emoji_lookup.keys()), n=1, cutoff=0.6)
-                if close:
-                    react_emoji = emoji_lookup[close[0]]
-                else:
-                    react_emoji = raw_react
+                react_emoji = raw_react
+
+        bot_user = self.bot.user
+        bot_id = str(bot_user.id) if bot_user else "bot"
+        bot_name = bot_user.display_name if bot_user else "LuLu"
+
+        # Lưu raw text sạch (dạng :tên_emote:), tuyệt đối không lưu mã <...:ID> vào database
+        await asyncio.to_thread(
+            db.save_message,
+            session_id,
+            "remi",
+            raw_answer,
+            bot_id,
+            bot_name,
+        )
 
         formatted_answer = self._format_emojis_in_text(raw_answer, emoji_mention_map)
 
         print(f"[LuLu Debug] Formatted answer gửi Discord: {repr(formatted_answer)}")
         if react_emoji:
             print(f"[LuLu Debug] Reaction sẽ thả: {repr(react_emoji)}")
-
-        bot_user = self.bot.user
-        bot_id = str(bot_user.id) if bot_user else "bot"
-        bot_name = bot_user.display_name if bot_user else "LuLu"
-        await asyncio.to_thread(
-            db.save_message,
-            session_id,
-            "remi",
-            formatted_answer,
-            bot_id,
-            bot_name,
-        )
 
         await message.reply(formatted_answer)
 
@@ -426,7 +409,8 @@ class Chat(commands.Cog):
 
     async def _answer(self, user_id: str, prompt: str) -> str:
         """Hàm dự phòng tương thích ngược."""
-        await asyncio.to_thread(db.save_message, user_id, "user", prompt)
+        clean_prompt = re.sub(r'<a?:([a-zA-Z0-9_]+):[^>]*>', r':\1:', prompt)
+        await asyncio.to_thread(db.save_message, user_id, "user", clean_prompt)
         history = await asyncio.to_thread(db.load_history, user_id)
         clean_history = self._sanitize_history_for_llm(history)
         answer = await asyncio.to_thread(ask_llm, prompt=prompt, history=clean_history)
