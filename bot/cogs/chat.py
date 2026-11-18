@@ -183,10 +183,8 @@ class Chat(commands.Cog):
         if not emoji_mention_map:
             return text
 
-        # Nếu AI lỡ sinh ra dạng <a?:name:id> từ lịch sử cũ, đổi về dạng thuần :name: để ánh xạ lại chuẩn ID và tiền tố
         normalized = re.sub(r'<a?:([a-zA-Z0-9_]+):[^>]*>', r':\1:', text)
 
-        # Thay thế chuẩn xác theo bảng ánh xạ str(e) từ server (tự động gắn <a:...> nếu là ảnh động)
         return re.sub(
             r'(?<!<)(?<!<a):([a-zA-Z0-9_]+):(?!\d+>)',
             lambda m: emoji_mention_map.get(m.group(1).lower(), m.group(0)),
@@ -271,11 +269,11 @@ class Chat(commands.Cog):
         profile_instruction = (
             f"HỒ SƠ NGƯỜI ĐANG NÓI CHUYỆN:\n"
             f"- Tên: {author_name}\n"
-            f"- Vai trò: {'Chỉ huy Kett (Người bạn thầm thích)' if is_cmd else 'Thành viên đồng đội'}\n"
+            f"- Vai trò: {'Chỉ huy Kett' if is_cmd else 'Chỉ huy của các đội khác'}\n"
             f"- Những điều bạn đã ghi nhớ về người này: {user_notes}\n\n"
             f"QUY TẮC ỨNG XỬ:\n"
             f"- Với Chỉ huy Kett: Luôn dịu dàng, quan tâm đặc biệt và xưng hô 'Chỉ huy'.\n"
-            f"- Với thành viên khác: Lịch sự, thân thiện, gọi họ bằng tên hiển thị và hỗ trợ tận tình."
+            f"- Với chỉ huy khác: Lịch sự, thân thiện, gọi họ bằng tên hiển thị và hỗ trợ tận tình."
         )
         hybrid_instruction_parts.append(profile_instruction)
 
