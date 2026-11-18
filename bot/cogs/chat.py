@@ -275,7 +275,7 @@ class Chat(commands.Cog):
                     if len(final_notes) > 250 or final_notes.count('|') >= 4:
                         asyncio.create_task(self._condense_user_memory(author_id, author_name, final_notes))
 
-        channel_recent_text = await self._get_channel_recent_context(message, limit=4)
+        channel_recent_text = await self._get_channel_recent_context(message, limit=10)
 
         emoji_guild = self._get_emoji_source_guild(message.guild)
         emoji_instruction, emoji_lookup, emoji_mention_map = self._get_server_emojis_context(emoji_guild)
