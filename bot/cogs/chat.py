@@ -167,15 +167,6 @@ class Chat(commands.Cog):
         except Exception as e:
             print(f"[LuLu Memory] Lỗi khi cô đọng hồ sơ cho {display_name}: {e}")
 
-    def _format_notes_display(self, notes: str) -> str:
-        """Định dạng trường notes thành các gạch đầu dòng rõ ràng, đẹp mắt trên Discord."""
-        if not notes or not notes.strip():
-            return "*(Chưa có ghi nhớ đặc biệt nào)*"
-        items = [item.strip() for item in notes.split('|') if item.strip()]
-        if not items:
-            return "*(Chưa có ghi nhớ đặc biệt nào)*"
-        return "\n".join(f"  ▫ {item}" for item in items)
-
     def _sanitize_history_for_llm(self, history: list[dict]) -> list[dict]:
         """
         Chuẩn hóa lịch sử chat trước khi gửi cho AI:
@@ -468,45 +459,47 @@ class Chat(commands.Cog):
 
         await self.bot.process_commands(message)
 
-    def _parse_members_and_text(self, ctx, content: str) -> tuple[list[discord.Member | discord.User], str]:
-        """
-        Phân tích danh sách thành viên và nội dung đi kèm từ câu lệnh.
-        - Hỗ trợ nhiều @mention cùng lúc (loại trừ bot).
-        - Nếu không có mention, mặc định là [ctx.author].
-        """
-        content = content.strip()
-        if ctx.message.mentions:
-            valid_mentions = [m for m in ctx.message.mentions if m != self.bot.user][:3]
-            if valid_mentions:
-                clean_text = content
-                for m in valid_mentions:
-                    clean_text = re.sub(rf'<@!?{m.id}>', '', clean_text)
-                return valid_mentions, clean_text.strip()
-
-        tokens = content.split(None, 1)
-        if tokens and tokens[0].isdigit() and len(tokens[0]) >= 15:
-            uid = int(tokens[0])
-            member = ctx.guild.get_member(uid) if ctx.guild else None
-            if member:
-                return [member], tokens[1].strip() if len(tokens) > 1 else ""
-
-        return [ctx.author], content
-
     @commands.command(name='ask')
     async def ask(self, ctx, *, content: str):
         await self._respond(ctx.message, content)
 
     @commands.command(name='clear', aliases=['cleardata', 'reset'])
-    async def clear_data(self, ctx):
+    async def clear_data(self, ctx, *, extra: str = ""):
         session_id = self._get_session_id(ctx.message)
         is_cmd = self._is_commander(ctx.author)
 
         if is_cmd:
-            await asyncio.to_thread(db.clear_history, session_id)
-            await ctx.reply("Em sẽ không quên chỉ huy đâu...")
+            valid_mentions = [m for m in ctx.message.mentions if m != self.bot.user]
+            tokens = extra.strip().split()
+            if not valid_mentions and tokens and tokens[0].isdigit() and len(tokens[0]) >= 15:
+                uid = int(tokens[0])
+                m = ctx.guild.get_member(uid) if ctx.guild else None
+                if not m:
+                    m = self.bot.get_user(uid)
+                if m:
+                    valid_mentions = [m]
+                else:
+                    target_id = tokens[0]
+                    await asyncio.to_thread(db.clear_history, session_id, target_id)
+                    await asyncio.to_thread(db.reset_user_memory, target_id)
+                    await ctx.reply(f"Dạ Chỉ huy, toàn bộ tin nhắn và hồ sơ ghi nhớ của ID `{target_id}` đã được xóa sạch theo lệnh rồi ạ!")
+                    return
+
+            if valid_mentions:
+                for target in valid_mentions:
+                    await asyncio.to_thread(db.clear_history, session_id, str(target.id))
+                    await asyncio.to_thread(db.reset_user_memory, str(target.id))
+
+                target_names = ", ".join(f"**{m.display_name}**" for m in valid_mentions)
+                await ctx.reply(f"Dạ Chỉ huy, toàn bộ tin nhắn và hồ sơ ghi nhớ của {target_names} đã được xóa sạch theo lệnh rồi ạ!")
+            else:
+                await asyncio.to_thread(db.clear_history, session_id)
+                await asyncio.to_thread(db.reset_user_memory, str(ctx.author.id))
+                await ctx.reply("Em sẽ không quên chỉ huy đâu... Lịch sử trò chuyện của kênh và hồ sơ ký ức đã được làm mới hoàn toàn!")
         else:
             await asyncio.to_thread(db.clear_history, session_id, str(ctx.author.id))
-            await ctx.reply(f"Dạ {ctx.author.display_name}, các tin nhắn của bạn đã được xóa khỏi dữ liệu của kênh này.")
+            await asyncio.to_thread(db.reset_user_memory, str(ctx.author.id))
+            await ctx.reply(f"Dạ {ctx.author.display_name}, toàn bộ tin nhắn và hồ sơ ghi nhớ về bạn đã được xóa sạch khỏi hệ thống.")
 
 
 async def setup(bot):
