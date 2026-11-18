@@ -10,7 +10,6 @@ MAX_MESSAGES = 20
 
 def init_db() -> None:
     with psycopg.connect(DATABASE_URL) as conn:
-        # Bảng 1: Lịch sử tin nhắn (ngắn hạn theo session)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS messages (
@@ -32,7 +31,6 @@ def init_db() -> None:
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS author_name TEXT;"
         )
 
-        # Bảng 2: Hồ sơ ghi nhớ dài hạn theo từng user (Long-Term Memo)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS user_memories (
@@ -103,9 +101,6 @@ def clear_history(session_id: str, author_id: str | None = None) -> None:
                 (session_id,),
             )
 
-
-# === Các hàm quản lý Hồ sơ Cá nhân Dài hạn (User Memories) ===
-
 def get_user_memory(user_id: str) -> dict | None:
     with psycopg.connect(DATABASE_URL) as conn:
         row = conn.execute(
@@ -169,23 +164,56 @@ def append_user_note(
     new_note: str,
     display_name: str = "",
     role_type: str = "member",
-) -> None:
+) -> tuple[bool, str]:
+    """
+    Thêm một ghi nhớ mới vào hồ sơ cá nhân.
+    - Tự động khử trùng lặp (không thêm nếu đã tồn tại thông tin tương tự).
+    - Trả về tuple (đã_thêm_hay_chưa, toàn_bộ_notes_hiện_tại).
+    """
+    clean_note = new_note.strip()
+    if not clean_note:
+        return False, ""
+
     with psycopg.connect(DATABASE_URL) as conn:
-        conn.execute(
-            """
-            INSERT INTO user_memories (user_id, display_name, role_type, notes, updated_at)
-            VALUES (%s, %s, %s, %s, now())
-            ON CONFLICT (user_id) DO UPDATE SET
-                display_name = CASE WHEN EXCLUDED.display_name <> '' THEN EXCLUDED.display_name ELSE user_memories.display_name END,
-                role_type = CASE WHEN EXCLUDED.role_type <> 'member' THEN EXCLUDED.role_type ELSE user_memories.role_type END,
-                notes = CASE
-                    WHEN user_memories.notes IS NULL OR user_memories.notes = '' THEN EXCLUDED.notes
-                    ELSE user_memories.notes || ' | ' || EXCLUDED.notes
-                END,
-                updated_at = now()
-            """,
-            (user_id, display_name or user_id, role_type, new_note),
-        )
+        row = conn.execute(
+            "SELECT notes, display_name, role_type FROM user_memories WHERE user_id = %s",
+            (user_id,),
+        ).fetchone()
+
+        if row:
+            curr_notes, curr_name, curr_role = row[0] or "", row[1], row[2]
+            items = [item.strip() for item in curr_notes.split('|') if item.strip()]
+
+            clean_lower = clean_note.lower()
+            for item in items:
+                item_lower = item.lower()
+                if clean_lower == item_lower or (len(clean_lower) >= 5 and clean_lower in item_lower):
+                    return False, curr_notes
+
+            items.append(clean_note)
+            final_notes = " | ".join(items)
+            name_to_save = display_name if display_name else curr_name
+            role_to_save = role_type if role_type != "member" else curr_role
+
+            conn.execute(
+                """
+                UPDATE user_memories
+                SET notes = %s, display_name = %s, role_type = %s, updated_at = now()
+                WHERE user_id = %s
+                """,
+                (final_notes, name_to_save, role_to_save, user_id),
+            )
+            return True, final_notes
+        else:
+            final_notes = clean_note
+            conn.execute(
+                """
+                INSERT INTO user_memories (user_id, display_name, role_type, notes, updated_at)
+                VALUES (%s, %s, %s, %s, now())
+                """,
+                (user_id, display_name or user_id, role_type, final_notes),
+            )
+            return True, final_notes
 
 
 def reset_user_memory(user_id: str) -> None:

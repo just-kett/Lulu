@@ -7,7 +7,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from data import db
-from gemini.serv import ask_llm
+from gemini.serv import ask_llm, condense_memories
 
 load_dotenv()
 llm_token = os.getenv('LLM')
@@ -32,7 +32,6 @@ class Chat(commands.Cog):
         """Xác định xem người nói có phải là Chỉ huy Kett hay không (ưu tiên so khớp ID)."""
         if self.commander_id:
             return author.id == self.commander_id
-        # Fallback tự động nhận diện nếu chưa cấu hình COMMANDER_ID trong .env
         name_lower = author.name.lower()
         display_lower = author.display_name.lower()
         return "kett" in name_lower or "kett" in display_lower
@@ -75,7 +74,6 @@ class Chat(commands.Cog):
         if not all_emojis:
             return None, {}, {}
 
-        # Bảng tra cứu chứa 100% emote của server
         emoji_lookup = {e.name.lower(): e for e in all_emojis}
         emoji_mention_map = {e.name.lower(): str(e) for e in all_emojis}
 
@@ -113,11 +111,11 @@ class Chat(commands.Cog):
         return "BỐI CẢNH VỪA DIỄN RA TRONG PHÒNG CHAT TRƯỚC ĐÓ:\n" + "\n".join(recent_chats)
 
     def _extract_memory_intent(self, prompt: str) -> str | None:
-        """Tự động phát hiện khi người dùng dặn bot ghi nhớ thông tin về họ."""
+        """Tự động phát hiện khi người dùng dặn bot ghi nhớ thông tin."""
         patterns = [
-            r'(?:hãy\s+)?nhớ\s+(?:rằng|là|cho\s+anh|cho\s+em|giúp\s+anh|giúp\s+em)?\s*[:,-]?\s*(.+)',
-            r'ghi\s+nhớ\s*[:,-]?\s*(.+)',
-            r'remember\s+(?:that)?\s*[:,-]?\s*(.+)',
+            r'(?:hãy\s+)?nhớ\s+(?:rằng|là|về|cho\s+(?:anh|em|mình|tớ)|giúp\s+(?:anh|em|mình|tớ)|hộ\s+(?:anh|em|mình|tớ)|giùm\s+(?:anh|em|mình|tớ))?\s*[:,-]?\s*(.+)',
+            r'ghi\s+nhớ\s*(?:rằng|là|về)?\s*[:,-]?\s*(.+)',
+            r'remember\s+(?:that|about)?\s*[:,-]?\s*(.+)',
         ]
         for pat in patterns:
             m = re.search(pat, prompt, re.IGNORECASE)
@@ -126,6 +124,57 @@ class Chat(commands.Cog):
                 if len(fact) >= 3:
                     return fact
         return None
+
+    def _extract_mention_fact(self, prompt: str, target: discord.Member | discord.User) -> str | None:
+        """Trích xuất thông tin về thành viên được mention ngay cả khi không dùng từ 'nhớ là'."""
+        clean = prompt.strip()
+        if clean.endswith('?') or any(q in clean.lower() for q in ['không?', 'chưa?', 'sao thế?', 'đâu rồi?', 'thế nào?', 'ở đâu?']):
+            return None
+
+        names = [rf'<@!?{target.id}>', rf'@{re.escape(target.display_name)}', rf'@{re.escape(target.name)}']
+        name_pat = f'(?:{"|".join(names)})'
+
+        pat1 = rf'{name_pat}(?:[\s,vàwith+]+(?:<@!?\d+>|@[\w\d_]+))*\s+((?:là|thích|rất|hay|ghét|sợ|mê|chuyên|khoái|bị|đang|vừa|cũng)\s+.+)'
+        m1 = re.search(pat1, clean, re.IGNORECASE)
+        if m1:
+            fact = m1.group(1).strip()
+            if len(fact) >= 3:
+                return fact
+
+        pat2 = rf'{name_pat}[,:-]?\s*(?:bạn\s+này|người\s+này|ông\s+này|bà\s+này|anh\s+này|chị\s+này|thằng\s+này|nó)\s+(.+)'
+        m2 = re.search(pat2, clean, re.IGNORECASE)
+        if m2:
+            fact = m2.group(1).strip()
+            if len(fact) >= 3:
+                return fact
+
+        pat3 = rf'^[^<@]*{name_pat}\s*[:\-=]\s*([^?!\n]+)$'
+        m3 = re.search(pat3, clean, re.IGNORECASE)
+        if m3:
+            candidate = m3.group(1).strip()
+            if candidate.lower() not in ['ơi', 'à', 'ê', 'chào', 'hello', 'hi'] and len(candidate) >= 3:
+                return candidate
+
+        return None
+
+    async def _condense_user_memory(self, user_id: str, display_name: str, current_notes: str):
+        """Tác vụ chạy nền (asynchronous background task) để cô đọng hồ sơ khi quá dài."""
+        try:
+            condensed = await asyncio.to_thread(condense_memories, current_notes)
+            if condensed and condensed != current_notes:
+                await asyncio.to_thread(db.set_user_notes, user_id, display_name, condensed)
+                print(f"[LuLu Memory] Đã cô đọng hồ sơ {display_name} thành công: {condensed}")
+        except Exception as e:
+            print(f"[LuLu Memory] Lỗi khi cô đọng hồ sơ cho {display_name}: {e}")
+
+    def _format_notes_display(self, notes: str) -> str:
+        """Định dạng trường notes thành các gạch đầu dòng rõ ràng, đẹp mắt trên Discord."""
+        if not notes or not notes.strip():
+            return "*(Chưa có ghi nhớ đặc biệt nào)*"
+        items = [item.strip() for item in notes.split('|') if item.strip()]
+        if not items:
+            return "*(Chưa có ghi nhớ đặc biệt nào)*"
+        return "\n".join(f"  ▫ {item}" for item in items)
 
     def _sanitize_history_for_llm(self, history: list[dict]) -> list[dict]:
         """
@@ -136,10 +185,9 @@ class Chat(commands.Cog):
         sanitized = []
         for item in history:
             text = item.get("content", "")
-            # Đổi <:name:id> hoặc <a:name:id> về :name:
             text = re.sub(r'<a?:([a-zA-Z0-9_]+):\d*>', r':\1:', text)
-            # Xóa các tag [REACT: ...] cũ
             text = re.sub(r'\[REACT:\s*[^\]]+\]', '', text).strip()
+            text = re.sub(r'\[MEMO:\s*[^\]]+\]', '', text).strip()
             sanitized.append({"role": item.get("role", "user"), "content": text})
         return sanitized
 
@@ -178,14 +226,10 @@ class Chat(commands.Cog):
         is_cmd = self._is_commander(message.author)
         formatted_prompt = self._format_user_prompt(message.author, prompt)
 
-        # Phát hiện xem tin nhắn có nhắc tới thành viên khác trong server không
-        target_member = None
+        target_members = []
         if message.guild and message.mentions:
-            other_mentions = [m for m in message.mentions if m != self.bot.user and m != message.author]
-            if other_mentions:
-                target_member = other_mentions[0]
+            target_members = [m for m in message.mentions if m != self.bot.user and m != message.author][:3]
 
-        # 1. Quản lý Hồ sơ Cá nhân Dài hạn (User Memo) của người nói
         user_mem = await asyncio.to_thread(db.get_user_memory, author_id)
         role_type = "commander" if is_cmd else "member"
 
@@ -200,34 +244,51 @@ class Chat(commands.Cog):
         else:
             user_notes = user_mem.get("notes", "")
 
-        # Tự động phát hiện ý định ghi nhớ thông tin mới
-        new_fact = self._extract_memory_intent(prompt)
-        if new_fact:
-            if is_cmd and target_member:
-                clean_target_fact = re.sub(rf'<@!?{target_member.id}>', '', new_fact).strip()
-                if clean_target_fact:
-                    t_role = "commander" if self._is_commander(target_member) else "member"
-                    await asyncio.to_thread(
+        saved_target_ids = set()
+
+        if target_members:
+            for tm in target_members:
+                t_fact = self._extract_mention_fact(prompt, tm)
+                if not t_fact:
+                    new_fact = self._extract_memory_intent(prompt)
+                    if new_fact:
+                        clean_t_fact = re.sub(
+                            rf'<@!?{tm.id}>|@{re.escape(tm.display_name)}|@{re.escape(tm.name)}',
+                            '',
+                            new_fact,
+                        ).strip()
+                        clean_t_fact = re.sub(r'^(?:về|rằng|là|:\s*|-)\s*', '', clean_t_fact, flags=re.IGNORECASE).strip()
+                        t_fact = clean_t_fact if len(clean_t_fact) >= 3 else None
+
+                if t_fact:
+                    t_role = "commander" if self._is_commander(tm) else "member"
+                    added, final_notes = await asyncio.to_thread(
                         db.append_user_note,
-                        str(target_member.id),
-                        clean_target_fact,
-                        target_member.display_name,
+                        str(tm.id),
+                        t_fact,
+                        tm.display_name,
                         t_role,
                     )
-                    print(f"[LuLu Memory] Chỉ huy đã cập nhật ghi nhớ cho {target_member.display_name}: {clean_target_fact}")
-            else:
-                await asyncio.to_thread(db.append_user_note, author_id, new_fact, author_name, role_type)
-                user_notes = f"{user_notes} | {new_fact}" if user_notes else new_fact
-                print(f"[LuLu Memory] Đã ghi nhớ thêm cho {author_name}: {new_fact}")
+                    saved_target_ids.add(tm.id)
+                    if added:
+                        print(f"[LuLu Memory Auto] {author_name} đã cập nhật ghi nhớ cho {tm.display_name}: {t_fact}")
+                        if len(final_notes) > 250 or final_notes.count('|') >= 4:
+                            asyncio.create_task(self._condense_user_memory(str(tm.id), tm.display_name, final_notes))
+        else:
+            new_fact = self._extract_memory_intent(prompt)
+            if new_fact:
+                added, final_notes = await asyncio.to_thread(db.append_user_note, author_id, new_fact, author_name, role_type)
+                user_notes = final_notes
+                if added:
+                    print(f"[LuLu Memory] Đã ghi nhớ thêm cho {author_name}: {new_fact}")
+                    if len(final_notes) > 250 or final_notes.count('|') >= 4:
+                        asyncio.create_task(self._condense_user_memory(author_id, author_name, final_notes))
 
-        # 2. Lấy bối cảnh các câu chat trôi nổi vừa diễn ra trong kênh (nếu có)
         channel_recent_text = await self._get_channel_recent_context(message, limit=4)
 
-        # 3. Lấy emote của server
         emoji_guild = self._get_emoji_source_guild(message.guild)
         emoji_instruction, emoji_lookup, emoji_mention_map = self._get_server_emojis_context(emoji_guild)
 
-        # 4. Ghép toàn bộ chỉ dẫn Hybrid cho AI
         hybrid_instruction_parts = []
         if emoji_instruction:
             hybrid_instruction_parts.append(emoji_instruction)
@@ -243,17 +304,22 @@ class Chat(commands.Cog):
         )
         hybrid_instruction_parts.append(profile_instruction)
 
-        # Nếu có đề cập đến thành viên khác trong câu nói, cung cấp hồ sơ thành viên đó cho AI
-        if target_member:
-            target_mem = await asyncio.to_thread(db.get_user_memory, str(target_member.id))
-            target_notes = (target_mem.get("notes") or "Chưa có ghi chép cụ thể") if target_mem else "Chưa có ghi chép cụ thể"
-            target_role_str = "Chỉ huy" if self._is_commander(target_member) else "Thành viên đồng đội"
+        if target_members:
+            target_sections = []
+            for tm in target_members:
+                t_mem = await asyncio.to_thread(db.get_user_memory, str(tm.id))
+                t_notes = (t_mem.get("notes") or "Chưa có ghi chép cụ thể") if t_mem else "Chưa có ghi chép cụ thể"
+                t_role = "Chỉ huy" if self._is_commander(tm) else "Thành viên đồng đội"
+                target_sections.append(
+                    f"• {tm.display_name} (ID: {tm.id}, Vai trò: {t_role}): {t_notes}"
+                )
+            target_list_str = "\n".join(target_sections)
             target_instruction = (
-                f"HỒ SƠ THÀNH VIÊN ĐƯỢC NHẮC TỚI ({target_member.display_name}):\n"
-                f"- Tên: {target_member.display_name}\n"
-                f"- Vai trò: {target_role_str}\n"
-                f"- Những điều bạn đã ghi nhớ về người này: {target_notes}\n"
-                f"*(Nếu Chỉ huy dặn nhớ điều gì về người này, hãy xác nhận dịu dàng rằng bạn đã ghi nhận vào hồ sơ của họ)*"
+                f"CÁC THÀNH VIÊN ĐƯỢC NHẮC TỚI TRONG TIN NHẮN:\n"
+                f"{target_list_str}\n\n"
+                f"QUY TẮC:\n"
+                f"- Nếu tin nhắn chia sẻ thông tin hoặc đặc điểm mới về bất kỳ ai trong số họ, hãy tự nhiên ghi nhận vào câu trả lời.\n"
+                f"- Bạn có thể đặt tag [MEMO: <Tên_hoặc_ID> | tóm tắt ngắn gọn] ở cuối câu để cập nhật cho người đó."
             )
             hybrid_instruction_parts.append(target_instruction)
 
@@ -264,7 +330,6 @@ class Chat(commands.Cog):
 
         print(f"[LuLu Debug] Session: {session_id} | Người nói: {author_name} ({'Chỉ huy' if is_cmd else 'Thành viên'}) | Emote: {len(emoji_mention_map)}")
 
-        # 5. Lưu tin nhắn người dùng vào session ngắn hạn
         await asyncio.to_thread(
             db.save_message,
             session_id,
@@ -294,7 +359,38 @@ class Chat(commands.Cog):
 
         print(f"[LuLu Debug] Raw answer từ AI: {repr(raw_answer)}")
 
-        # 6. Trích xuất tag [REACT: emote_name] nếu có
+        memo_matches = re.findall(r'\[MEMO:\s*([^\]]+)\]', raw_answer, re.IGNORECASE)
+        if memo_matches:
+            raw_answer = re.sub(r'\[MEMO:\s*[^\]]+\]', '', raw_answer).strip()
+            for ai_memo in memo_matches:
+                ai_memo = ai_memo.strip()
+                target_tm = None
+                memo_content = ai_memo
+
+                if '|' in ai_memo:
+                    target_ident, memo_content = [part.strip() for part in ai_memo.split('|', 1)]
+                    for tm in target_members:
+                        if target_ident.lower() in [str(tm.id), tm.name.lower(), tm.display_name.lower()]:
+                            target_tm = tm
+                            break
+                elif target_members:
+                    target_tm = target_members[0]
+
+                if target_tm and target_tm.id not in saved_target_ids:
+                    t_role = "commander" if self._is_commander(target_tm) else "member"
+                    added, final_notes = await asyncio.to_thread(
+                        db.append_user_note,
+                        str(target_tm.id),
+                        memo_content,
+                        target_tm.display_name,
+                        t_role,
+                    )
+                    saved_target_ids.add(target_tm.id)
+                    if added:
+                        print(f"[LuLu Memory AI] Đã tự động ghi nhớ từ AI cho {target_tm.display_name}: {memo_content}")
+                        if len(final_notes) > 250 or final_notes.count('|') >= 4:
+                            asyncio.create_task(self._condense_user_memory(str(target_tm.id), target_tm.display_name, final_notes))
+
         react_emoji = None
         react_match = re.search(r'\[REACT:\s*([^\]]+)\]', raw_answer, re.IGNORECASE)
         if react_match:
@@ -311,14 +407,12 @@ class Chat(commands.Cog):
                 else:
                     react_emoji = raw_react
 
-        # 7. Format custom emote trong văn bản
         formatted_answer = self._format_emojis_in_text(raw_answer, emoji_mention_map)
 
         print(f"[LuLu Debug] Formatted answer gửi Discord: {repr(formatted_answer)}")
         if react_emoji:
             print(f"[LuLu Debug] Reaction sẽ thả: {repr(react_emoji)}")
 
-        # 8. Lưu câu trả lời của bot vào session ngắn hạn
         bot_user = self.bot.user
         bot_id = str(bot_user.id) if bot_user else "bot"
         bot_name = bot_user.display_name if bot_user else "LuLu"
@@ -331,10 +425,8 @@ class Chat(commands.Cog):
             bot_name,
         )
 
-        # 9. Gửi tin nhắn trả lời
         await message.reply(formatted_answer)
 
-        # 10. Thả reaction vào tin nhắn người dùng (nếu có emote phù hợp)
         if react_emoji:
             try:
                 await message.add_reaction(react_emoji)
@@ -376,183 +468,33 @@ class Chat(commands.Cog):
 
         await self.bot.process_commands(message)
 
-    def _parse_member_and_text(self, ctx, content: str) -> tuple[discord.Member | discord.User, str]:
+    def _parse_members_and_text(self, ctx, content: str) -> tuple[list[discord.Member | discord.User], str]:
         """
-        Phân tích đối tượng thành viên và nội dung đi kèm từ câu lệnh.
-        - Nếu có @mention thành viên (khác bot): chọn thành viên đó.
-        - Nếu từ đầu tiên là snowflake ID và tìm thấy trong guild: chọn thành viên đó.
-        - Mặc định: đối tượng là chính người gọi lệnh (ctx.author).
+        Phân tích danh sách thành viên và nội dung đi kèm từ câu lệnh.
+        - Hỗ trợ nhiều @mention cùng lúc (loại trừ bot).
+        - Nếu không có mention, mặc định là [ctx.author].
         """
         content = content.strip()
-        # 1. Kiểm tra mentions trong tin nhắn (loại trừ bot)
         if ctx.message.mentions:
-            valid_mentions = [m for m in ctx.message.mentions if m != self.bot.user]
+            valid_mentions = [m for m in ctx.message.mentions if m != self.bot.user][:3]
             if valid_mentions:
-                target = valid_mentions[0]
-                clean_text = re.sub(rf'<@!?{target.id}>', '', content).strip()
-                return target, clean_text
+                clean_text = content
+                for m in valid_mentions:
+                    clean_text = re.sub(rf'<@!?{m.id}>', '', clean_text)
+                return valid_mentions, clean_text.strip()
 
-        # 2. Kiểm tra nếu từ đầu tiên là user ID bằng số
         tokens = content.split(None, 1)
         if tokens and tokens[0].isdigit() and len(tokens[0]) >= 15:
             uid = int(tokens[0])
             member = ctx.guild.get_member(uid) if ctx.guild else None
             if member:
-                return member, tokens[1].strip() if len(tokens) > 1 else ""
+                return [member], tokens[1].strip() if len(tokens) > 1 else ""
 
-        # 3. Mặc định là chính author
-        return ctx.author, content
+        return [ctx.author], content
 
     @commands.command(name='ask')
     async def ask(self, ctx, *, content: str):
         await self._respond(ctx.message, content)
-
-    @commands.command(name='memo', aliases=['profile', 'memory'])
-    async def show_memo(self, ctx, *, content: str = ""):
-        """
-        Xem hồ sơ và những điều Lulu đang ghi nhớ.
-        - Xem của mình: !memo
-        - Xem của thành viên khác: !memo @Member
-        """
-        target, _ = self._parse_member_and_text(ctx, content)
-        target_id = str(target.id)
-        target_name = target.display_name
-        is_target_cmd = self._is_commander(target)
-
-        user_mem = await asyncio.to_thread(db.get_user_memory, target_id)
-
-        if not user_mem or not user_mem.get("notes"):
-            notes = "Chưa có ghi nhớ đặc biệt nào."
-        else:
-            notes = user_mem.get("notes")
-
-        role_str = "Chỉ huy (Người quan trọng nhất)" if is_target_cmd else "Thành viên / Đồng đội"
-
-        if target.id == ctx.author.id:
-            header = f"📋 **Hồ sơ ký ức của Lulu về {target_name}:**"
-            footer = "*(Bạn có thể dặn Lulu nhớ thêm điều gì đó bằng cách nói 'Lulu nhớ là...' hoặc dùng lệnh `!remember <nội dung>`)*"
-        else:
-            header = f"📋 **Hồ sơ ký ức của Lulu về thành viên {target_name}:**"
-            footer = "*(Chỉ huy có thể cập nhật ghi nhớ bằng lệnh `!remember @Member <nội dung>` hoặc `!setmemo @Member <nội dung>`)*"
-
-        reply_msg = (
-            f"{header}\n"
-            f"• **Vai trò:** {role_str}\n"
-            f"• **Những điều đã ghi nhớ:** {notes}\n\n"
-            f"{footer}"
-        )
-        await ctx.reply(reply_msg)
-
-    @commands.command(name='remember', aliases=['nhớ', 'ghinho'])
-    async def remember_fact(self, ctx, *, content: str = ""):
-        """
-        Chủ động dặn Lulu ghi nhớ thêm thông tin.
-        - Tự dặn cho bản thân: !remember <nội dung>
-        - Chỉ huy dặn cho thành viên khác: !remember @Member <nội dung>
-        """
-        target, fact = self._parse_member_and_text(ctx, content)
-        fact = fact.strip()
-
-        if not fact:
-            if target == ctx.author:
-                await ctx.reply("Bạn muốn Lulu nhớ điều gì về bạn nào? (Ví dụ: `!remember tôi thích uống trà xanh`)")
-            else:
-                await ctx.reply(f"Chỉ huy muốn Lulu ghi nhớ điều gì về **{target.display_name}** ạ? (Ví dụ: `!remember @{target.display_name} là tay súng cừ khôi`)")
-            return
-
-        is_cmd = self._is_commander(ctx.author)
-
-        # Kiểm tra quyền: Chỉ có Chỉ huy mới được dặn nhớ cho người khác
-        if target.id != ctx.author.id and not is_cmd:
-            await ctx.reply(
-                f"Dạ {ctx.author.display_name}, chỉ có Chỉ huy Kett mới có quyền thiết lập và ghi chú hồ sơ cho các thành viên khác trong đội thôi ạ."
-            )
-            return
-
-        target_id = str(target.id)
-        target_name = target.display_name
-        target_role = "commander" if self._is_commander(target) else "member"
-
-        await asyncio.to_thread(db.append_user_note, target_id, fact, target_name, target_role)
-
-        if target.id == ctx.author.id:
-            if is_cmd:
-                await ctx.reply(f"Dạ Chỉ huy, em đã ghi nhớ về Chỉ huy: *'{fact}'* rồi ạ! :lucia_smile:")
-            else:
-                await ctx.reply(f"Mình đã ghi nhớ điều này về bạn rồi nhé: *'{fact}'*")
-        else:
-            await ctx.reply(
-                f"Dạ Chỉ huy, em đã ghi nhận thông tin vào hồ sơ của **{target_name}**: *'{fact}'* rồi ạ! :lucia_smile:"
-            )
-
-    @commands.command(name='setmemo', aliases=['datghinho', 'ghide'])
-    async def set_memo(self, ctx, *, content: str = ""):
-        """
-        Thiết lập hoặc ghi đè toàn bộ ghi nhớ (chỉ huy có quyền với mọi thành viên).
-        - Đặt cho chính mình: !setmemo <nội dung>
-        - Chỉ huy đặt cho người khác: !setmemo @Member <nội dung>
-        """
-        target, fact = self._parse_member_and_text(ctx, content)
-        fact = fact.strip()
-
-        if not fact:
-            await ctx.reply("Vui lòng nhập nội dung ghi nhớ! Cú pháp: `!setmemo [@Member] <nội dung>`")
-            return
-
-        is_cmd = self._is_commander(ctx.author)
-
-        if target.id != ctx.author.id and not is_cmd:
-            await ctx.reply(
-                f"Dạ {ctx.author.display_name}, chỉ có Chỉ huy Kett mới có quyền thay đổi hồ sơ của các thành viên khác trong đội thôi ạ."
-            )
-            return
-
-        target_id = str(target.id)
-        target_name = target.display_name
-        target_role = "commander" if self._is_commander(target) else "member"
-
-        await asyncio.to_thread(db.set_user_notes, target_id, target_name, fact, target_role)
-
-        if target.id == ctx.author.id:
-            if is_cmd:
-                await ctx.reply(f"Dạ Chỉ huy, em đã cập nhật lại toàn bộ hồ sơ của Chỉ huy: *'{fact}'* rồi ạ! :lucia_smile:")
-            else:
-                await ctx.reply(f"Đã cập nhật lại toàn bộ hồ sơ của bạn: *'{fact}'*")
-        else:
-            await ctx.reply(
-                f"Dạ Chỉ huy, em đã cập nhật lại hồ sơ của **{target_name}**: *'{fact}'* rồi ạ! :lucia_smile:"
-            )
-
-    @commands.command(name='clearmemo', aliases=['resetmemo', 'xoaghinho'])
-    async def clear_memo(self, ctx, *, content: str = ""):
-        """
-        Xóa hồ sơ ghi nhớ dài hạn (User Memo).
-        - Tự xóa của mình: !clearmemo
-        - Chỉ huy xóa của thành viên khác: !clearmemo @Member
-        """
-        target, _ = self._parse_member_and_text(ctx, content)
-        is_cmd = self._is_commander(ctx.author)
-
-        if target.id != ctx.author.id and not is_cmd:
-            await ctx.reply(
-                f"Dạ {ctx.author.display_name}, chỉ có Chỉ huy Kett mới có quyền xóa hồ sơ của thành viên khác thôi ạ."
-            )
-            return
-
-        target_id = str(target.id)
-        target_name = target.display_name
-
-        await asyncio.to_thread(db.reset_user_memory, target_id)
-
-        if target.id == ctx.author.id:
-            if is_cmd:
-                await ctx.reply("Dạ Chỉ huy, hồ sơ ký ức của Chỉ huy đã được làm mới hoàn toàn rồi ạ!")
-            else:
-                await ctx.reply(f"Hồ sơ ghi nhớ về bạn ({target_name}) đã được xóa khỏi hệ thống.")
-        else:
-            await ctx.reply(
-                f"Dạ Chỉ huy, em đã xóa sạch toàn bộ hồ sơ ghi nhớ của **{target_name}** theo lệnh của Chỉ huy rồi ạ."
-            )
 
     @commands.command(name='clear', aliases=['cleardata', 'reset'])
     async def clear_data(self, ctx):
@@ -560,11 +502,9 @@ class Chat(commands.Cog):
         is_cmd = self._is_commander(ctx.author)
 
         if is_cmd:
-            # Chỉ huy reset làm mới toàn bộ phòng chat / DM
             await asyncio.to_thread(db.clear_history, session_id)
-            await ctx.reply("Em sẽ không quên chỉ huy đâu... Lịch sử trò chuyện của kênh này đã được làm mới!")
+            await ctx.reply("Em sẽ không quên chỉ huy đâu...")
         else:
-            # Thành viên khác chỉ xóa các tin nhắn do chính họ gửi
             await asyncio.to_thread(db.clear_history, session_id, str(ctx.author.id))
             await ctx.reply(f"Dạ {ctx.author.display_name}, các tin nhắn của bạn đã được xóa khỏi dữ liệu của kênh này.")
 
