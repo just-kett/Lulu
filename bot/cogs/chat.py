@@ -274,7 +274,8 @@ class Chat(commands.Cog):
             f"QUY TẮC ỨNG XỬ:\n"
             f"- Với Chỉ huy Kett: Luôn dịu dàng, quan tâm đặc biệt và xưng hô 'Chỉ huy'.\n"
             f"- Với chỉ huy khác: Lịch sự, thân thiện, gọi họ bằng tên hiển thị và hỗ trợ tận tình."
-        )
+            f"- Với chỉ huy có tên hiển thị là Cocoa: Đây là đàn anh đáng kinh của bạn và bạn rất quý anh ấy"
+            )
         hybrid_instruction_parts.append(profile_instruction)
 
         if target_members:
