@@ -39,6 +39,15 @@ class CustomBot(commands.Bot):
 
     async def on_ready(self) -> None:
         activity = discord.CustomActivity(name="𝑻𝒉𝒊𝒔 𝒊𝒔 𝑳𝒖𝒄𝒊𝒂, 𝒕𝒉𝒆 𝑮𝒓𝒂𝒚 𝑹𝒂𝒗𝒆𝒏 𝑪𝒂𝒑𝒕𝒂𝒊𝒏. 𝑰'𝒎 𝒂𝒕 𝒚𝒐𝒖𝒓 𝒔𝒆𝒓𝒗𝒊𝒄𝒆. 𝑳𝒆𝒕'𝒔 𝒈𝒐, 𝑪𝒐𝒎𝒎𝒂𝒏𝒅𝒂𝒏𝒕. 𝑾𝒆 𝒉𝒂𝒗𝒆 𝒎𝒖𝒄𝒉 𝒕𝒐 𝒅𝒐.")
+
+        activity = discord.Game(name="Punishing: Gray Raven")
+
+        # activity = discord.Activity(type=discord.ActivityType.listening, name="lệnh từ Chỉ huy Kett")
+
+        # activity = discord.Activity(type=discord.ActivityType.watching, name="Chỉ huy Kett")
+
+        # activity = discord.Streaming(name="Chiến dịch Babylonia", url="https://twitch.tv/discord")
+
         await self.change_presence(status=discord.Status.online, activity=activity)
         print(f"LuLu đã sẵn sàng: {self.user} (ID: {self.user.id})")
 
