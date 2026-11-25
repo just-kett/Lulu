@@ -249,6 +249,42 @@ class Moderation(commands.Cog):
         except discord.HTTPException as e:
             return False, f"Lỗi Discord API khi ban: {e}"
 
+    async def _record_warn_and_punish(
+        self,
+        guild: discord.Guild,
+        channel: discord.abc.Messageable,
+        target: discord.Member | discord.User,
+        reason: str,
+        warn_message: str | None = None,
+    ) -> None:
+        """Ghi nhận cảnh cáo, gửi thông báo nhắc nhở hoặc mute khi đạt ngưỡng."""
+        warn_count = await asyncio.to_thread(
+            db.add_warning,
+            str(guild.id),
+            str(target.id),
+            reason,
+            str(self.bot.user.id) if self.bot.user else "auto",
+        )
+        rules = await self._get_guild_rules(guild.id)
+        max_warnings = rules["max_warnings"]
+        mute_minutes = rules["mute_minutes"]
+        msg_text = warn_message or f"Chỉ huy {target.mention}, đừng có gửi mấy cái biến thái như thế nữa!"
+
+        if warn_count >= max_warnings:
+            mute_reason = f"Đạt giới hạn {max_warnings} lần cảnh cáo ({reason})"
+            muted, mute_err = await self._mute_member_with_reason(guild, target, mute_minutes, mute_reason)
+            if muted:
+                await asyncio.to_thread(db.clear_active_warnings, str(guild.id), str(target.id))
+                await channel.send(
+                    f"Em đã khóa mõm chỉ huy {target.mention} trong {mute_minutes} phút"
+                )
+            else:
+                await channel.send(
+                    f"{msg_text} Lulu vẫn chưa thể khóa mõm anh {mute_err}..."
+                )
+        else:
+            await channel.send(msg_text)
+
     async def _handle_violation(self, message: discord.Message, reason: str) -> None:
         """Xóa tin nhắn vi phạm, gửi cảnh cáo trực tiếp và mute nếu vượt ngưỡng."""
         guild = message.guild
@@ -261,33 +297,22 @@ class Moderation(commands.Cog):
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
 
-        warn_count = await asyncio.to_thread(
-            db.add_warning,
-            str(guild.id),
-            str(author.id),
-            reason,
-            str(self.bot.user.id) if self.bot.user else "auto",
-        )
-        rules = await self._get_guild_rules(guild.id)
-        max_warnings = rules["max_warnings"]
-        mute_minutes = rules["mute_minutes"]
+        await self._record_warn_and_punish(guild, message.channel, author, reason)
 
-        if warn_count >= max_warnings:
-            mute_reason = f"Đạt giới hạn {max_warnings} lần cảnh cáo ({reason})"
-            muted, mute_err = await self._mute_member_with_reason(guild, author, mute_minutes, mute_reason)
-            if muted:
-                await asyncio.to_thread(db.clear_active_warnings, str(guild.id), str(author.id))
-                await message.channel.send(
-                    f"Em đã khóa mõm chỉ huy {author.mention} trong {mute_minutes} phút"
-                )
-            else:
-                await message.channel.send(
-                    f"Chỉ huy {author.mention}, đừng có gửi mấy cái biến thái như thế nữa! Lulu vẫn chưa thể khóa mõm anh {mute_err}..."
-                )
-        else:
-            await message.channel.send(
-                f"Chỉ huy {author.mention}, đừng có gửi mấy cái biến thái như thế nữa!"
-            )
+    async def _find_reaction_violation(self, guild_id: int, emoji: discord.PartialEmoji) -> str | None:
+        """Kiểm tra reaction có sử dụng emote hoặc emoji bị cấm không."""
+        rules = await self._get_guild_rules(guild_id)
+        if emoji.id is not None:
+            e_name = emoji.name or ""
+            if str(emoji.id) in rules["emote_ids"] or (e_name and e_name.lower() in rules["emote_names"]):
+                return f"Thả reaction bị cấm: `:{e_name}:`"
+            return None
+
+        norm_name = (emoji.name or "").replace("\ufe0f", "")
+        for u_val, u_label in rules["unicode_emotes"]:
+            if u_val and u_val == norm_name:
+                return f"Thả reaction bị cấm: {u_label}"
+        return None
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -308,6 +333,54 @@ class Moderation(commands.Cog):
         reason = await self.find_violation(after)
         if reason:
             await self._handle_violation(after, reason)
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        if not payload.guild_id:
+            return
+        if self.bot.user and payload.user_id == self.bot.user.id:
+            return
+
+        guild = self.bot.get_guild(payload.guild_id)
+        if not guild:
+            return
+
+        member = payload.member or guild.get_member(payload.user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(payload.user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return
+
+        if self._is_exempt(member):
+            return
+
+        reason = await self._find_reaction_violation(guild.id, payload.emoji)
+        if not reason:
+            return
+
+        channel = self.bot.get_channel(payload.channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(payload.channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return
+
+        if hasattr(channel, "get_partial_message"):
+            try:
+                partial_msg = channel.get_partial_message(payload.message_id)
+                await partial_msg.remove_reaction(payload.emoji, member)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+        if isinstance(channel, discord.abc.Messageable):
+            await self._record_warn_and_punish(
+                guild,
+                channel,
+                member,
+                reason,
+                warn_message=f"Chỉ huy {member.mention}, đừng có dùng mấy cái emoji biến thái đó để react tin nhắn nữa!",
+            )
 
     async def _require_admin(self, ctx: commands.Context) -> bool:
         if not ctx.guild:
