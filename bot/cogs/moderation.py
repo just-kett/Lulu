@@ -14,6 +14,48 @@ raw_commander = os.getenv('COMMANDER_ID', '').strip().strip('"').strip("'")
 COMMANDER_ID = int(raw_commander) if raw_commander.isdigit() else None
 
 CUSTOM_EMOTE_RE = re.compile(r'<a?:([a-zA-Z0-9_]+):(\d+)>')
+URL_RE = re.compile(r'https?://[^\s<>()]+', re.IGNORECASE)
+TENOR_VIEW_RE = re.compile(r'^https?://(?:www\.)?tenor\.com/view/(?:[^/?#\s]*-)?(\d+)', re.IGNORECASE)
+TENOR_MEDIA_RE = re.compile(r'^https?://(?:media\d*|c)\.tenor\.com/([^/?#\s]+)/', re.IGNORECASE)
+GIPHY_PAGE_RE = re.compile(r'^https?://(?:www\.)?giphy\.com/gifs/(?:[^/?#\s]*-)?([a-zA-Z0-9]+)', re.IGNORECASE)
+GIPHY_MEDIA_RE = re.compile(r'^https?://(?:media\d*\.)?giphy\.com/media/(?:v\d+\.[^/]+/)?([a-zA-Z0-9]+)/', re.IGNORECASE)
+GIPHY_I_RE = re.compile(r'^https?://i\.giphy\.com/(?:media/)?([a-zA-Z0-9]+)\.', re.IGNORECASE)
+
+
+def _normalize_url(raw_url: str) -> str:
+    clean = raw_url.strip().strip("<>").rstrip(".,!?)")
+    base = clean.split("?", 1)[0].split("#", 1)[0]
+    if "://media.discordapp.net/" in base.lower():
+        base = re.sub(r'://media\.discordapp\.net/', '://cdn.discordapp.com/', base, flags=re.IGNORECASE)
+    return base
+
+
+def _parse_gif_url(raw_url: str) -> tuple[str, str] | None:
+    """Chuẩn hóa URL GIF (Tenor, Giphy, Discord CDN, link .gif) thành (item_value, display_label)."""
+    norm = _normalize_url(raw_url)
+    if not norm.lower().startswith(("http://", "https://")):
+        return None
+
+    m = TENOR_VIEW_RE.match(norm)
+    if m:
+        return f"tenor:{m.group(1)}", norm
+
+    m = TENOR_MEDIA_RE.match(norm)
+    if m:
+        return f"tenor_media:{m.group(1)}", norm
+
+    for pat in (GIPHY_PAGE_RE, GIPHY_MEDIA_RE, GIPHY_I_RE):
+        m = pat.match(norm)
+        if m:
+            return f"giphy:{m.group(1)}", norm
+
+    return f"url:{norm.lower()}", norm
+
+
+def _is_gif_attachment(att) -> bool:
+    fname = (getattr(att, "filename", "") or "").lower()
+    ctype = (getattr(att, "content_type", "") or "").lower()
+    return fname.endswith(".gif") or "gif" in ctype
 
 
 def _compile_word_pattern(word: str) -> re.Pattern:
@@ -107,6 +149,8 @@ class Moderation(commands.Cog):
         unicode_emotes: list[tuple[str, str]] = []
         sticker_ids: set[str] = set()
         sticker_names: set[str] = set()
+        gif_keys: set[str] = set()
+        gif_names: set[str] = set()
 
         for item in items:
             itype = item["item_type"]
@@ -134,6 +178,11 @@ class Moderation(commands.Cog):
                     sticker_names.add(ival[5:])
                 else:
                     sticker_ids.add(ival)
+            elif itype == "gif" and ival:
+                if ival.startswith("name:"):
+                    gif_names.add(ival[5:])
+                else:
+                    gif_keys.add(ival)
 
         rules = {
             "word_patterns": word_patterns,
@@ -142,6 +191,8 @@ class Moderation(commands.Cog):
             "unicode_emotes": unicode_emotes,
             "sticker_ids": sticker_ids,
             "sticker_names": sticker_names,
+            "gif_keys": gif_keys,
+            "gif_names": gif_names,
             "max_warnings": max_warnings,
             "mute_minutes": mute_minutes,
         }
@@ -149,15 +200,21 @@ class Moderation(commands.Cog):
         return rules
 
     @staticmethod
-    def _extract_message_payload(message: discord.Message) -> tuple[list[str], list]:
-        """Trích xuất toàn bộ nội dung văn bản và sticker từ tin nhắn gốc lẫn các snapshot được forward."""
+    def _extract_message_payload(message: discord.Message) -> tuple[list[str], list, list, list]:
+        """Trích xuất nội dung văn bản, sticker, tệp đính kèm và embed từ tin nhắn gốc lẫn tin nhắn forward."""
         contents: list[str] = []
         stickers: list = []
+        attachments: list = []
+        embeds: list = []
 
         if message.content:
             contents.append(message.content)
         if message.stickers:
             stickers.extend(message.stickers)
+        if getattr(message, "attachments", None):
+            attachments.extend(message.attachments)
+        if getattr(message, "embeds", None):
+            embeds.extend(message.embeds)
 
         snapshots = getattr(message, "message_snapshots", None) or []
         for snap in snapshots:
@@ -167,6 +224,12 @@ class Moderation(commands.Cog):
             snap_stickers = getattr(snap, "stickers", None)
             if snap_stickers:
                 stickers.extend(snap_stickers)
+            snap_atts = getattr(snap, "attachments", None)
+            if snap_atts:
+                attachments.extend(snap_atts)
+            snap_embeds = getattr(snap, "embeds", None)
+            if snap_embeds:
+                embeds.extend(snap_embeds)
 
         if not snapshots and message.reference and getattr(message.reference, "type", None) == discord.MessageReferenceType.forward:
             ref_cached = getattr(message.reference, "cached_message", None)
@@ -175,39 +238,84 @@ class Moderation(commands.Cog):
                     contents.append(ref_cached.content)
                 if ref_cached.stickers:
                     stickers.extend(ref_cached.stickers)
+                if getattr(ref_cached, "attachments", None):
+                    attachments.extend(ref_cached.attachments)
+                if getattr(ref_cached, "embeds", None):
+                    embeds.extend(ref_cached.embeds)
 
-        return contents, stickers
+        return contents, stickers, attachments, embeds
+
+    @staticmethod
+    def _iter_embed_urls(embed) -> list[str]:
+        urls: list[str] = []
+        if getattr(embed, "url", None):
+            urls.append(embed.url)
+        for attr in ("image", "thumbnail", "video"):
+            media = getattr(embed, attr, None)
+            media_url = getattr(media, "url", None) if media else None
+            if media_url:
+                urls.append(media_url)
+        return urls
 
     async def find_violation(self, message: discord.Message) -> str | None:
-        """Kiểm tra tin nhắn (kể cả nội dung forward) có chứa sticker, emote hoặc từ bị cấm không."""
+        """Kiểm tra tin nhắn (kể cả nội dung forward) có chứa sticker, GIF, emote hoặc từ bị cấm không."""
         if not message.guild:
             return None
 
         rules = await self._get_guild_rules(message.guild.id)
-        contents, stickers = self._extract_message_payload(message)
+        contents, stickers, attachments, embeds = self._extract_message_payload(message)
 
         # 1. Kiểm tra Sticker bị cấm
         for sticker in stickers:
             if str(sticker.id) in rules["sticker_ids"] or sticker.name.lower() in rules["sticker_names"]:
                 return f"Sử dụng sticker bị cấm: `{sticker.name}`"
 
+        # 2. Kiểm tra GIF đính kèm hoặc link/embed GIF bị cấm
+        if rules["gif_keys"] or rules["gif_names"]:
+            for att in attachments:
+                if not _is_gif_attachment(att):
+                    continue
+                fname = (getattr(att, "filename", "") or "").lower()
+                size = getattr(att, "size", 0) or 0
+                if fname and fname in rules["gif_names"]:
+                    return f"Gửi GIF bị cấm: `{att.filename}`"
+                if fname and size and f"file:{size}:{fname}" in rules["gif_keys"]:
+                    return f"Gửi GIF bị cấm: `{att.filename}`"
+                att_url = getattr(att, "url", None)
+                if att_url:
+                    parsed = _parse_gif_url(att_url)
+                    if parsed and parsed[0] in rules["gif_keys"]:
+                        return f"Gửi GIF bị cấm: `{att.filename or parsed[1]}`"
+
+            for emb in embeds:
+                for emb_url in self._iter_embed_urls(emb):
+                    parsed = _parse_gif_url(emb_url)
+                    if parsed and parsed[0] in rules["gif_keys"]:
+                        return f"Gửi GIF bị cấm: {parsed[1]}"
+
+            for text in contents:
+                for raw_url in URL_RE.findall(text):
+                    parsed = _parse_gif_url(raw_url)
+                    if parsed and parsed[0] in rules["gif_keys"]:
+                        return f"Gửi GIF bị cấm: {parsed[1]}"
+
         if not contents:
             return None
 
         combined_content = "\n".join(contents)
 
-        # 2. Kiểm tra Custom Emote bị cấm (<:name:id> / <a:name:id>)
+        # 3. Kiểm tra Custom Emote bị cấm (<:name:id> / <a:name:id>)
         for name, emote_id in CUSTOM_EMOTE_RE.findall(combined_content):
             if emote_id in rules["emote_ids"] or name.lower() in rules["emote_names"]:
                 return f"Sử dụng emote bị cấm: `:{name}:`"
 
-        # 3. Kiểm tra Unicode Emoji bị cấm
+        # 4. Kiểm tra Unicode Emoji bị cấm
         norm_content = combined_content.replace("\ufe0f", "")
         for u_val, u_label in rules["unicode_emotes"]:
             if u_val and u_val in norm_content:
                 return f"Sử dụng emote bị cấm: {u_label}"
 
-        # 4. Kiểm tra Từ/Cụm từ bị cấm (loại bỏ mã custom emote trước để tránh bắt nhầm ID/tên emote)
+        # 5. Kiểm tra Từ/Cụm từ bị cấm (loại bỏ mã custom emote trước để tránh bắt nhầm ID/tên emote)
         text_only = CUSTOM_EMOTE_RE.sub(" ", combined_content)
         for label, pattern in rules["word_patterns"]:
             if pattern.search(text_only):
@@ -541,7 +649,7 @@ class Moderation(commands.Cog):
         if not clean_arg and ctx.message.reference and ctx.message.reference.message_id:
             try:
                 ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
-                _, ref_stickers = self._extract_message_payload(ref_msg)
+                _, ref_stickers, _, _ = self._extract_message_payload(ref_msg)
                 for s in ref_stickers:
                     targets.append((f"id:{s.id}", f"{s.name} (ID: {s.id})"))
                 if targets:
@@ -635,9 +743,163 @@ class Moderation(commands.Cog):
             parts.append("Không tìm thấy trong danh sách: " + ", ".join(not_found))
         await ctx.reply("\n".join(parts))
 
+    # ---------------- QUẢN LÝ GIF CẤM ----------------
+
+    async def _resolve_gifs(self, ctx: commands.Context, arg: str) -> list[tuple[str, str]]:
+        """Trích xuất GIF từ file đính kèm, link trong tham số, hoặc tin nhắn được reply."""
+        targets: list[tuple[str, str]] = []
+        seen_vals: set[str] = set()
+
+        def add_target(val: str, label: str) -> None:
+            if val not in seen_vals:
+                seen_vals.add(val)
+                targets.append((val, label))
+
+        for att in getattr(ctx.message, "attachments", []) or []:
+            if _is_gif_attachment(att):
+                fname = (att.filename or "gif").lower()
+                size = att.size or 0
+                if size and fname:
+                    add_target(f"file:{size}:{fname}", f"{att.filename} ({size}B)")
+                elif att.url:
+                    parsed = _parse_gif_url(att.url)
+                    if parsed:
+                        add_target(*parsed)
+        if targets:
+            return targets
+
+        clean_arg = arg.strip()
+        if clean_arg:
+            urls = URL_RE.findall(clean_arg)
+            if urls:
+                for u in urls:
+                    parsed = _parse_gif_url(u)
+                    if parsed:
+                        add_target(*parsed)
+                return targets
+            if clean_arg.isdigit() and len(clean_arg) >= 8:
+                add_target(f"tenor:{clean_arg}", f"Tenor ID: {clean_arg}")
+            else:
+                add_target(f"name:{clean_arg.lower()}", clean_arg)
+            return targets
+
+        if ctx.message.reference and ctx.message.reference.message_id:
+            try:
+                ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+                ref_contents, _, ref_atts, ref_embeds = self._extract_message_payload(ref_msg)
+
+                for att in ref_atts:
+                    if _is_gif_attachment(att):
+                        fname = (att.filename or "gif").lower()
+                        size = att.size or 0
+                        if size and fname:
+                            add_target(f"file:{size}:{fname}", f"{att.filename} ({size}B)")
+                        elif att.url:
+                            parsed = _parse_gif_url(att.url)
+                            if parsed:
+                                add_target(*parsed)
+
+                if not targets:
+                    for text in ref_contents:
+                        for u in URL_RE.findall(text):
+                            parsed = _parse_gif_url(u)
+                            if parsed:
+                                add_target(*parsed)
+
+                if not targets:
+                    for emb in ref_embeds:
+                        for emb_url in self._iter_embed_urls(emb):
+                            parsed = _parse_gif_url(emb_url)
+                            if parsed:
+                                add_target(*parsed)
+                                break
+            except Exception:
+                pass
+
+        return targets
+
+    @commands.command(name='bangif')
+    async def ban_gif(self, ctx: commands.Context, *, arg: str = ""):
+        """Cấm một GIF cụ thể (reply vào GIF, gửi kèm file .gif hoặc dán link Tenor/Giphy)."""
+        if not await self._require_admin(ctx):
+            return
+
+        targets = await self._resolve_gifs(ctx, arg)
+        if not targets:
+            await ctx.reply(
+                "Chỉ huy hãy **reply** vào tin nhắn chứa GIF rồi gõ `!bangif`, gửi kèm file `.gif`, hoặc dán link GIF (VD: `!bangif https://tenor.com/view/...`)."
+            )
+            return
+
+        added_labels = []
+        existed_labels = []
+        for val, label in targets:
+            added = await asyncio.to_thread(
+                db.add_banned_item,
+                str(ctx.guild.id),
+                "gif",
+                val,
+                label,
+                str(ctx.author.id),
+            )
+            if added:
+                added_labels.append(f"`{label}`")
+            else:
+                existed_labels.append(f"`{label}`")
+
+        self._invalidate_cache(ctx.guild.id)
+
+        parts = []
+        if added_labels:
+            parts.append("Đã thêm GIF cấm: " + ", ".join(added_labels))
+        if existed_labels:
+            parts.append("Đã có sẵn trong danh sách: " + ", ".join(existed_labels))
+        await ctx.reply("\n".join(parts))
+
+    @commands.command(name='unbangif')
+    async def unban_gif(self, ctx: commands.Context, *, arg: str = ""):
+        """Gỡ GIF khỏi danh sách cấm."""
+        if not await self._require_admin(ctx):
+            return
+
+        targets = await self._resolve_gifs(ctx, arg)
+        if not targets:
+            await ctx.reply("Chỉ huy hãy **reply** vào GIF hoặc nhập link/tên GIF cần gỡ.")
+            return
+
+        current_items = await asyncio.to_thread(db.list_banned_items, str(ctx.guild.id), "gif")
+        removed_labels = []
+        not_found = []
+
+        for val, label in targets:
+            removed = await asyncio.to_thread(db.remove_banned_item, str(ctx.guild.id), "gif", val)
+            if not removed:
+                search_key = val.split(":", 1)[-1].lower()
+                for item in current_items:
+                    if search_key in item["display_label"].lower() or search_key in item["item_value"].lower():
+                        removed = await asyncio.to_thread(
+                            db.remove_banned_item, str(ctx.guild.id), "gif", item["item_value"]
+                        )
+                        if removed:
+                            label = item["display_label"]
+                            break
+            if removed:
+                removed_labels.append(f"`{label}`")
+            else:
+                not_found.append(f"`{label}`")
+
+        self._invalidate_cache(ctx.guild.id)
+
+        parts = []
+        if removed_labels:
+            parts.append("Đã gỡ GIF cấm: " + ", ".join(removed_labels))
+        if not_found:
+            parts.append("Không tìm thấy trong danh sách: " + ", ".join(not_found))
+        await ctx.reply("\n".join(parts))
+
     @commands.command(name='banlist')
     async def list_banned(self, ctx: commands.Context):
-        """Hiển thị toàn bộ danh sách từ, emote, sticker đang bị cấm trong server."""
+        """Hiển thị toàn bộ danh sách từ, emote, sticker, GIF đang bị cấm trong server."""
         if not await self._require_admin(ctx):
             return
 
@@ -648,6 +910,7 @@ class Moderation(commands.Cog):
         words = [f"`{i['display_label']}`" for i in items if i["item_type"] == "word"]
         emotes = [i["display_label"] for i in items if i["item_type"] == "emote"]
         stickers = [f"`{i['display_label']}`" for i in items if i["item_type"] == "sticker"]
+        gifs = [f"`{i['display_label']}`" for i in items if i["item_type"] == "gif"]
 
         embed = discord.Embed(
             title=f"Danh sách kiểm duyệt — {ctx.guild.name}",
@@ -667,6 +930,11 @@ class Moderation(commands.Cog):
         embed.add_field(
             name=f"Sticker bị cấm ({len(stickers)})",
             value=", ".join(stickers)[:1000] if stickers else "*Trống*",
+            inline=False,
+        )
+        embed.add_field(
+            name=f"GIF bị cấm ({len(gifs)})",
+            value=", ".join(gifs)[:1000] if gifs else "*Trống*",
             inline=False,
         )
         await ctx.reply(embed=embed)
@@ -913,6 +1181,7 @@ class Moderation(commands.Cog):
                 "`!banword` / `!unbanword <từ>` — Thêm, gỡ từ cấm\n"
                 "`!banemote` / `!unbanemote <emote>` — Thêm, gỡ emote cấm\n"
                 "`!bansticker` / `!unbansticker [ID/tên]` — Thêm, gỡ sticker (có thể reply)\n"
+                "`!bangif` / `!unbangif [link/tên]` — Thêm, gỡ GIF (có thể reply)\n"
                 "`!banlist` — Xem toàn bộ danh sách cấm và cấu hình"
             ),
             inline=False,
