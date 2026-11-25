@@ -1,4 +1,5 @@
 import asyncio
+from datetime import timedelta
 import os
 import re
 import discord
@@ -94,9 +95,10 @@ class Moderation(commands.Cog):
             return cached
 
         gid_str = str(guild_id)
-        items, max_warnings = await asyncio.gather(
+        items, max_warnings, mute_minutes = await asyncio.gather(
             asyncio.to_thread(db.list_banned_items, gid_str),
             asyncio.to_thread(db.get_guild_max_warnings, gid_str),
+            asyncio.to_thread(db.get_guild_mute_minutes, gid_str),
         )
 
         word_patterns: list[tuple[str, re.Pattern]] = []
@@ -141,6 +143,7 @@ class Moderation(commands.Cog):
             "sticker_ids": sticker_ids,
             "sticker_names": sticker_names,
             "max_warnings": max_warnings,
+            "mute_minutes": mute_minutes,
         }
         self._filter_cache[guild_id] = rules
         return rules
@@ -180,6 +183,25 @@ class Moderation(commands.Cog):
 
         return None
 
+    async def _mute_member_with_reason(
+        self,
+        guild: discord.Guild,
+        target: discord.Member | discord.User,
+        minutes: int,
+        reason: str,
+    ) -> tuple[bool, str]:
+        """Thực hiện mute (timeout) thành viên và trả về (thành_công, thông_báo_lỗi_nếu_có)."""
+        member = target if isinstance(target, discord.Member) else guild.get_member(target.id)
+        if not member:
+            return False, "Không tìm thấy thành viên trong máy chủ."
+        try:
+            await member.timeout(timedelta(minutes=minutes), reason=reason)
+            return True, ""
+        except discord.Forbidden:
+            return False, "LuLu thiếu quyền **Moderate Members** hoặc vai trò của thành viên này cao hơn LuLu."
+        except discord.HTTPException as e:
+            return False, f"Lỗi Discord API khi mute: {e}"
+
     async def _ban_member_with_reason(
         self,
         guild: discord.Guild,
@@ -196,23 +218,16 @@ class Moderation(commands.Cog):
             return False, f"Lỗi Discord API khi ban: {e}"
 
     async def _handle_violation(self, message: discord.Message, reason: str) -> None:
-        """Xóa tin nhắn vi phạm, ghi cảnh cáo, thông báo tại kênh chat và ban nếu đạt ngưỡng."""
+        """Xóa tin nhắn vi phạm, gửi cảnh cáo trực tiếp và mute nếu vượt ngưỡng."""
         guild = message.guild
         author = message.author
         if not guild:
             return
 
-        deleted = False
-        delete_err = ""
         try:
             await message.delete()
-            deleted = True
-        except discord.NotFound:
-            deleted = True
-        except discord.Forbidden:
-            delete_err = " *(LuLu thiếu quyền Manage Messages nên chưa thể tự xóa tin nhắn này)*"
-        except discord.HTTPException:
-            delete_err = " *(Không thể xóa tin nhắn do lỗi kết nối Discord)*"
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
 
         warn_count = await asyncio.to_thread(
             db.add_warning,
@@ -223,41 +238,24 @@ class Moderation(commands.Cog):
         )
         rules = await self._get_guild_rules(guild.id)
         max_warnings = rules["max_warnings"]
+        mute_minutes = rules["mute_minutes"]
 
         if warn_count >= max_warnings:
-            ban_reason = f"Đạt giới hạn {max_warnings} lần cảnh cáo ({reason})"
-            banned, ban_err = await self._ban_member_with_reason(guild, author, ban_reason)
-            if banned:
+            mute_reason = f"Đạt giới hạn {max_warnings} lần cảnh cáo ({reason})"
+            muted, mute_err = await self._mute_member_with_reason(guild, author, mute_minutes, mute_reason)
+            if muted:
                 await asyncio.to_thread(db.clear_active_warnings, str(guild.id), str(author.id))
-                embed = discord.Embed(
-                    title="Đã tự động Ban thành viên",
-                    description=(
-                        f"{author.mention} đã đạt **{warn_count}/{max_warnings}** lần cảnh cáo và bị **Ban** khỏi máy chủ.\n"
-                        f"• **Vi phạm cuối:** {reason}"
-                    ),
-                    color=discord.Color.red(),
+                await message.channel.send(
+                    f"Em đã khóa mõm chỉ huy {author.mention} trong {mute_minutes} phút"
                 )
-                await message.channel.send(embed=embed)
             else:
-                embed = discord.Embed(
-                    title="Cảnh cáo vi phạm",
-                    description=(
-                        f"Chỉ huy {author.mention}, đừng gửi mấy thứ biến thái nữa! '' if deleted else delete_err}.\n"
-                    ),
-                    color=discord.Color.dark_orange(),
+                await message.channel.send(
+                    f"Chỉ huy {author.mention}, đừng có gửi mấy cái biến thái như thế nữa! Lulu vẫn chưa thể khóa mõm anh {mute_err}..."
                 )
-                await message.channel.send(embed=embed)
         else:
-            embed = discord.Embed(
-                title="Cảnh cáo vi phạm nội quy",
-                description=(
-                    f"{author.mention}, vui lòng không gửi nội dung bị cấm trong máy chủ{'' if deleted else delete_err}.\n"
-                    f"• **Lý do:** {reason}\n"
-                    f"• **Số lần cảnh cáo:** **{warn_count}/{max_warnings}** *(đạt {max_warnings} lần sẽ bị Ban tự động)*"
-                ),
-                color=discord.Color.orange(),
+            await message.channel.send(
+                f"Chỉ huy {author.mention}, đừng có gửi mấy cái biến thái như thế nữa!"
             )
-            await message.channel.send(embed=embed)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -281,7 +279,7 @@ class Moderation(commands.Cog):
 
     async def _require_admin(self, ctx: commands.Context) -> bool:
         if not ctx.guild:
-            await ctx.reply("Lệnh quản trị chỉ hoạt động bên trong máy chủ (server) thôi ạ.")
+            await ctx.reply("Lệnh quản trị chỉ hoạt động bên trong máy chủ thôi ạ.")
             return False
         if not self._is_admin(ctx.author):
             await ctx.reply("Dạ, chỉ có Chỉ huy Kett hoặc Quản trị viên mới có quyền dùng lệnh quản trị này thôi ạ.")
@@ -539,14 +537,15 @@ class Moderation(commands.Cog):
 
         items = await asyncio.to_thread(db.list_banned_items, str(ctx.guild.id))
         max_warn = await asyncio.to_thread(db.get_guild_max_warnings, str(ctx.guild.id))
+        mute_mins = await asyncio.to_thread(db.get_guild_mute_minutes, str(ctx.guild.id))
 
         words = [f"`{i['display_label']}`" for i in items if i["item_type"] == "word"]
         emotes = [i["display_label"] for i in items if i["item_type"] == "emote"]
         stickers = [f"`{i['display_label']}`" for i in items if i["item_type"] == "sticker"]
 
         embed = discord.Embed(
-            title=f"🛡️ Danh sách kiểm duyệt — {ctx.guild.name}",
-            description=f"Ngưỡng cảnh cáo tự động Ban hiện tại: **{max_warn} lần**",
+            title=f"Danh sách kiểm duyệt — {ctx.guild.name}",
+            description=f"Ngưỡng cảnh cáo: **{max_warn} lần** → Tự động Mute **{mute_mins} phút**",
             color=discord.Color.blue(),
         )
         embed.add_field(
@@ -570,7 +569,7 @@ class Moderation(commands.Cog):
 
     @commands.command(name='warn')
     async def warn_member(self, ctx: commands.Context, member: discord.Member, *, reason: str = "Vi phạm nội quy máy chủ"):
-        """Gửi cảnh cáo thủ công tới thành viên và tự động ban nếu đạt ngưỡng."""
+        """Gửi cảnh cáo thủ công tới thành viên và tự động mute nếu đạt ngưỡng."""
         if not await self._require_admin(ctx):
             return
 
@@ -585,24 +584,26 @@ class Moderation(commands.Cog):
         warn_count = await asyncio.to_thread(
             db.add_warning, guild_id, str(member.id), reason, str(ctx.author.id)
         )
-        max_warn = await asyncio.to_thread(db.get_guild_max_warnings, guild_id)
+        rules = await self._get_guild_rules(ctx.guild.id)
+        max_warn = rules["max_warnings"]
+        mute_minutes = rules["mute_minutes"]
 
         if warn_count >= max_warn:
-            banned, ban_err = await self._ban_member_with_reason(
-                ctx.guild, member, f"Đạt {max_warn} lần cảnh cáo ({reason})"
+            muted, mute_err = await self._mute_member_with_reason(
+                ctx.guild, member, mute_minutes, f"Đạt {max_warn} lần cảnh cáo ({reason})"
             )
-            if banned:
+            if muted:
                 await asyncio.to_thread(db.clear_active_warnings, guild_id, str(member.id))
                 await ctx.send(
-                    f"{member.mention} đã nhận cảnh cáo **{warn_count}/{max_warn}** (Lý do: *{reason}*) và bị **Ban** khỏi máy chủ!"
+                    f"Em đã khóa mõm chỉ huy {member.mention} trong {mute_minutes} phút"
                 )
             else:
                 await ctx.send(
-                    f"{member.mention} đã đạt **{warn_count}/{max_warn}** lần cảnh cáo (Lý do: *{reason}*), nhưng không thể tự động Ban: {ban_err}"
+                    f"Chỉ huy {member.mention}, đừng có gửi mấy cái biến thái như thế nữa! *(Chưa thể mute: {mute_err})*"
                 )
         else:
             await ctx.send(
-                f"**Cảnh cáo** dành cho {member.mention} ({warn_count}/{max_warn})\n• **Lý do:** {reason}"
+                f"Chỉ huy {member.mention}, đừng có gửi mấy cái biến thái như thế nữa!"
             )
 
     @commands.command(name='warns')
@@ -621,7 +622,7 @@ class Moderation(commands.Cog):
         max_warn = await asyncio.to_thread(db.get_guild_max_warnings, gid)
 
         if not warnings_list:
-            await ctx.reply(f"✅ **{target.display_name}** hiện chưa có cảnh cáo nào (0/{max_warn}).")
+            await ctx.reply(f"**{target.display_name}** hiện chưa có cảnh cáo nào (0/{max_warn}).")
             return
 
         lines = [
@@ -629,7 +630,7 @@ class Moderation(commands.Cog):
             for idx, w in enumerate(warnings_list[-10:], start=1)
         ]
         embed = discord.Embed(
-            title=f"⚠️ Hồ sơ cảnh cáo: {target.display_name} ({len(warnings_list)}/{max_warn})",
+            title=f"Hồ sơ cảnh cáo: {target.display_name} ({len(warnings_list)}/{max_warn})",
             description="\n".join(lines),
             color=discord.Color.orange(),
         )
@@ -646,14 +647,14 @@ class Moderation(commands.Cog):
 
     @commands.command(name='maxwarn')
     async def set_max_warn(self, ctx: commands.Context, count: int | None = None):
-        """Xem hoặc thay đổi ngưỡng cảnh cáo tối đa trước khi tự động Ban."""
+        """Xem hoặc thay đổi ngưỡng cảnh cáo tối đa trước khi tự động Mute."""
         if not await self._require_admin(ctx):
             return
 
         gid = str(ctx.guild.id)
         if count is None:
             curr = await asyncio.to_thread(db.get_guild_max_warnings, gid)
-            await ctx.reply(f"Ngưỡng cảnh cáo tự động Ban hiện tại là **{curr} lần**.")
+            await ctx.reply(f"Ngưỡng cảnh cáo tự động Mute hiện tại là **{curr} lần**.")
             return
 
         if count < 1 or count > 20:
@@ -662,7 +663,64 @@ class Moderation(commands.Cog):
 
         await asyncio.to_thread(db.set_guild_max_warnings, gid, count)
         self._invalidate_cache(ctx.guild.id)
-        await ctx.reply(f"Dạ, em đã cập nhật ngưỡng cảnh cáo tự động Ban thành **{count} lần** rồi ạ!")
+        await ctx.reply(f"Dạ, em đã cập nhật ngưỡng cảnh cáo tự động Mute thành **{count} lần** rồi ạ!")
+
+    @commands.command(name='mutetime')
+    async def set_mute_time(self, ctx: commands.Context, minutes: int | None = None):
+        """Xem hoặc thay đổi thời gian Mute (phút) khi vượt ngưỡng cảnh cáo."""
+        if not await self._require_admin(ctx):
+            return
+
+        gid = str(ctx.guild.id)
+        if minutes is None:
+            curr = await asyncio.to_thread(db.get_guild_mute_minutes, gid)
+            await ctx.reply(f"Thời gian tự động Mute hiện tại là **{curr} phút**.")
+            return
+
+        if minutes < 1 or minutes > 40320:
+            await ctx.reply("Chỉ huy vui lòng chọn thời gian Mute từ `1` đến `40320` phút (28 ngày) nhé ạ.")
+            return
+
+        await asyncio.to_thread(db.set_guild_mute_minutes, gid, minutes)
+        self._invalidate_cache(ctx.guild.id)
+        await ctx.reply(f"Dạ, em đã cập nhật thời gian tự động Mute thành **{minutes} phút** rồi ạ!")
+
+    @commands.command(name='mute')
+    async def mute_member(self, ctx: commands.Context, member: discord.Member, minutes: int | None = None, *, reason: str = "Vi phạm quy định máy chủ"):
+        """Mute (timeout) trực tiếp một thành viên trong số phút chỉ định."""
+        if not await self._require_admin(ctx):
+            return
+
+        if member.id == ctx.author.id or self._is_exempt(member):
+            await ctx.reply("Không thể mute Chỉ huy Kett, Quản trị viên hoặc Bot ạ.")
+            return
+
+        mute_minutes = minutes if minutes is not None else await asyncio.to_thread(db.get_guild_mute_minutes, str(ctx.guild.id))
+        if mute_minutes < 1 or mute_minutes > 40320:
+            await ctx.reply("Thời gian mute phải nằm trong khoảng `1` đến `40320` phút ạ.")
+            return
+
+        muted, mute_err = await self._mute_member_with_reason(
+            ctx.guild, member, mute_minutes, f"Bởi {ctx.author}: {reason}"
+        )
+        if muted:
+            await ctx.send(f"Em đã khóa mõm chỉ huy {member.mention} trong {mute_minutes} phút")
+        else:
+            await ctx.reply(f"Không thể mute **{member.display_name}**: {mute_err}")
+
+    @commands.command(name='unmute')
+    async def unmute_member(self, ctx: commands.Context, member: discord.Member):
+        """Gỡ Mute (timeout) cho một thành viên."""
+        if not await self._require_admin(ctx):
+            return
+
+        try:
+            await member.timeout(None, reason=f"Gỡ mute bởi {ctx.author}")
+            await ctx.reply(f"Đã gỡ mute cho **{member.display_name}** rồi ạ.")
+        except discord.Forbidden:
+            await ctx.reply("LuLu thiếu quyền **Moderate Members** hoặc vai trò của thành viên này cao hơn LuLu.")
+        except discord.HTTPException as e:
+            await ctx.reply(f"Lỗi Discord API khi gỡ mute: {e}")
 
     @commands.command(name='ban')
     async def ban_member(self, ctx: commands.Context, member: discord.Member, *, reason: str = "Vi phạm quy định máy chủ"):
@@ -687,7 +745,7 @@ class Moderation(commands.Cog):
             await asyncio.to_thread(db.clear_active_warnings, str(ctx.guild.id), str(member.id))
             await ctx.reply(f"Đã Ban **{member.display_name}** (`{member.id}`).\n• **Lý do:** {reason}")
         else:
-            await ctx.reply(f"❌ Không thể Ban **{member.display_name}**: {ban_err}")
+            await ctx.reply(f"Không thể Ban **{member.display_name}**: {ban_err}")
 
     @commands.command(name='unban')
     async def unban_member(self, ctx: commands.Context, user_id: str = ""):
@@ -703,13 +761,13 @@ class Moderation(commands.Cog):
         try:
             user = discord.Object(id=int(clean_id))
             await ctx.guild.unban(user, reason=f"Gỡ ban bởi {ctx.author}")
-            await ctx.reply(f"✅ Đã gỡ Ban cho người dùng ID `{clean_id}` rồi ạ.")
+            await ctx.reply(f"Đã gỡ Ban cho người dùng ID `{clean_id}` rồi ạ.")
         except discord.NotFound:
             await ctx.reply(f"Không tìm thấy người dùng ID `{clean_id}` trong danh sách bị Ban.")
         except discord.Forbidden:
-            await ctx.reply("❌ LuLu thiếu quyền **Ban Members** để gỡ Ban.")
+            await ctx.reply("LuLu thiếu quyền **Ban Members** để gỡ Ban.")
         except discord.HTTPException as e:
-            await ctx.reply(f"❌ Lỗi Discord API khi gỡ ban: {e}")
+            await ctx.reply(f"Lỗi Discord API khi gỡ ban: {e}")
 
     @commands.command(name='purge')
     async def purge_messages(self, ctx: commands.Context, amount: int = 0):
@@ -724,20 +782,20 @@ class Moderation(commands.Cog):
         try:
             deleted = await ctx.channel.purge(limit=amount + 1)
             actual_deleted = max(0, len(deleted) - 1)
-            msg = await ctx.send(f"🧹 Đã dọn dẹp **{actual_deleted}** tin nhắn theo lệnh của {ctx.author.mention}.")
+            msg = await ctx.send(f"Đã dọn dẹp **{actual_deleted}** tin nhắn theo lệnh của {ctx.author.mention}.")
             await asyncio.sleep(4)
             await msg.delete()
         except discord.Forbidden:
-            await ctx.reply("❌ LuLu thiếu quyền **Manage Messages** để xóa tin nhắn trong kênh này.")
+            await ctx.reply("LuLu thiếu quyền **Manage Messages** để xóa tin nhắn trong kênh này.")
         except discord.HTTPException as e:
-            await ctx.reply(f"❌ Không thể xóa tin nhắn: {e}")
+            await ctx.reply(f"Không thể xóa tin nhắn: {e}")
 
     @commands.command(name='modhelp')
     async def mod_help(self, ctx: commands.Context):
         """Hiển thị hướng dẫn các lệnh quản trị của LuLu."""
         embed = discord.Embed(
             title="Hệ thống Quản trị của LuLu",
-            description="Tự động **xóa tin nhắn**, **cảnh cáo tại kênh** và **Ban** khi vượt ngưỡng vi phạm.",
+            description="Tự động **xóa tin nhắn**, **nhắc nhở trực tiếp** và **Mute** khi vượt ngưỡng vi phạm.",
             color=discord.Color.teal(),
         )
         embed.add_field(
@@ -751,12 +809,14 @@ class Moderation(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Cảnh cáo, Xóa & Ban",
+            name="Cảnh cáo, Mute, Xóa & Ban",
             value=(
-                "`!warn @user [lý do]` — Gửi cảnh cáo thủ công\n"
+                "`!warn @user [lý do]` — Cảnh cáo thủ công\n"
                 "`!warns [@user]` — Xem số lần cảnh cáo\n"
                 "`!clearwarn @user` — Xóa hết cảnh cáo cho thành viên\n"
-                "`!maxwarn [số]` — Đặt ngưỡng cảnh cáo tự động Ban (mặc định: 3)\n"
+                "`!maxwarn [số]` — Đặt ngưỡng cảnh cáo tự động Mute (mặc định: 3)\n"
+                "`!mutetime [phút]` — Đặt thời gian tự động Mute (mặc định: 10 phút)\n"
+                "`!mute @user [phút] [lý do]` / `!unmute @user` — Mute hoặc gỡ Mute trực tiếp\n"
                 "`!ban @user [lý do]` / `!unban <ID>` — Ban hoặc gỡ Ban trực tiếp\n"
                 "`!purge <1-100>` — Xóa nhanh tin nhắn trong kênh"
             ),

@@ -83,9 +83,13 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS guild_mod_settings (
                 guild_id TEXT PRIMARY KEY,
                 max_warnings INT DEFAULT 3,
+                mute_minutes INT DEFAULT 10,
                 updated_at TIMESTAMPTZ DEFAULT now()
             )
             """
+        )
+        conn.execute(
+            "ALTER TABLE guild_mod_settings ADD COLUMN IF NOT EXISTS mute_minutes INT DEFAULT 10;"
         )
 
 
@@ -397,7 +401,7 @@ def get_guild_max_warnings(guild_id: str) -> int:
 
 
 def set_guild_max_warnings(guild_id: str, max_warnings: int) -> None:
-    """Cập nhật ngưỡng cảnh cáo tối đa trước khi tự động ban."""
+    """Cập nhật ngưỡng cảnh cáo tối đa trước khi tự động mute."""
     with psycopg.connect(DATABASE_URL) as conn:
         conn.execute(
             """
@@ -408,4 +412,30 @@ def set_guild_max_warnings(guild_id: str, max_warnings: int) -> None:
                 updated_at = now()
             """,
             (guild_id, max(1, max_warnings)),
+        )
+
+
+def get_guild_mute_minutes(guild_id: str) -> int:
+    """Lấy thời gian mute mặc định (phút) khi vượt ngưỡng cảnh cáo (mặc định: 10)."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        row = conn.execute(
+            "SELECT mute_minutes FROM guild_mod_settings WHERE guild_id = %s",
+            (guild_id,),
+        ).fetchone()
+    return int(row[0]) if row and row[0] and row[0] >= 1 else 10
+
+
+def set_guild_mute_minutes(guild_id: str, mute_minutes: int) -> None:
+    """Cập nhật thời gian mute (phút, tối đa 40320 phút = 28 ngày theo giới hạn Discord)."""
+    clamped = max(1, min(40320, mute_minutes))
+    with psycopg.connect(DATABASE_URL) as conn:
+        conn.execute(
+            """
+            INSERT INTO guild_mod_settings (guild_id, mute_minutes, updated_at)
+            VALUES (%s, %s, now())
+            ON CONFLICT (guild_id) DO UPDATE SET
+                mute_minutes = EXCLUDED.mute_minutes,
+                updated_at = now()
+            """,
+            (guild_id, clamped),
         )
