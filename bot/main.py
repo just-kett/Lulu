@@ -59,7 +59,7 @@ async def main():
     logger.addHandler(handler)
 
     async with ClientSession() as our_client:
-        exts = ['cogs.chat']
+        exts = ['cogs.moderation', 'cogs.chat']
         intents = discord.Intents.default()
         intents.message_content = True
         async with CustomBot(

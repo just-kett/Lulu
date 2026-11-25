@@ -43,6 +43,51 @@ def init_db() -> None:
             """
         )
 
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS banned_items (
+                id BIGSERIAL PRIMARY KEY,
+                guild_id TEXT NOT NULL,
+                item_type TEXT NOT NULL,
+                item_value TEXT NOT NULL,
+                display_label TEXT DEFAULT '',
+                created_by TEXT DEFAULT '',
+                created_at TIMESTAMPTZ DEFAULT now(),
+                UNIQUE (guild_id, item_type, item_value)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_banned_items_guild ON banned_items(guild_id, item_type)"
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_warnings (
+                id BIGSERIAL PRIMARY KEY,
+                guild_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                issued_by TEXT DEFAULT 'auto',
+                active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMPTZ DEFAULT now()
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_warnings_guild_user ON user_warnings(guild_id, user_id, active)"
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS guild_mod_settings (
+                guild_id TEXT PRIMARY KEY,
+                max_warnings INT DEFAULT 3,
+                updated_at TIMESTAMPTZ DEFAULT now()
+            )
+            """
+        )
+
 
 def save_message(
     session_id: str,
@@ -219,3 +264,148 @@ def append_user_note(
 def reset_user_memory(user_id: str) -> None:
     with psycopg.connect(DATABASE_URL) as conn:
         conn.execute("DELETE FROM user_memories WHERE user_id = %s", (user_id,))
+
+
+def add_banned_item(
+    guild_id: str,
+    item_type: str,
+    item_value: str,
+    display_label: str = "",
+    created_by: str = "",
+) -> bool:
+    """Thêm một từ, emote hoặc sticker vào danh sách cấm của server. Trả về True nếu mới thêm."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO banned_items (guild_id, item_type, item_value, display_label, created_by)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (guild_id, item_type, item_value) DO NOTHING
+            """,
+            (guild_id, item_type, item_value, display_label or item_value, created_by),
+        )
+        return cur.rowcount > 0
+
+
+def remove_banned_item(guild_id: str, item_type: str, item_value: str) -> bool:
+    """Gỡ một mục khỏi danh sách cấm theo guild_id, item_type, item_value."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        cur = conn.execute(
+            """
+            DELETE FROM banned_items
+            WHERE guild_id = %s AND item_type = %s AND item_value = %s
+            """,
+            (guild_id, item_type, item_value),
+        )
+        return cur.rowcount > 0
+
+
+def list_banned_items(guild_id: str, item_type: str | None = None) -> list[dict]:
+    """Lấy danh sách các mục bị cấm của một server."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        if item_type:
+            rows = conn.execute(
+                """
+                SELECT item_type, item_value, display_label, created_by, created_at
+                FROM banned_items
+                WHERE guild_id = %s AND item_type = %s
+                ORDER BY id ASC
+                """,
+                (guild_id, item_type),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT item_type, item_value, display_label, created_by, created_at
+                FROM banned_items
+                WHERE guild_id = %s
+                ORDER BY item_type ASC, id ASC
+                """,
+                (guild_id,),
+            ).fetchall()
+    return [
+        {
+            "item_type": r[0],
+            "item_value": r[1],
+            "display_label": r[2],
+            "created_by": r[3],
+            "created_at": r[4],
+        }
+        for r in rows
+    ]
+
+
+def add_warning(guild_id: str, user_id: str, reason: str, issued_by: str = "auto") -> int:
+    """Ghi nhận một lần cảnh cáo mới và trả về tổng số cảnh cáo đang hiệu lực."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        conn.execute(
+            """
+            INSERT INTO user_warnings (guild_id, user_id, reason, issued_by, active)
+            VALUES (%s, %s, %s, %s, TRUE)
+            """,
+            (guild_id, user_id, reason, issued_by),
+        )
+        row = conn.execute(
+            """
+            SELECT COUNT(*) FROM user_warnings
+            WHERE guild_id = %s AND user_id = %s AND active = TRUE
+            """,
+            (guild_id, user_id),
+        ).fetchone()
+    return int(row[0]) if row else 1
+
+
+def get_active_warnings(guild_id: str, user_id: str) -> list[dict]:
+    """Lấy danh sách các lần cảnh cáo đang hiệu lực của thành viên."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, reason, issued_by, created_at
+            FROM user_warnings
+            WHERE guild_id = %s AND user_id = %s AND active = TRUE
+            ORDER BY id ASC
+            """,
+            (guild_id, user_id),
+        ).fetchall()
+    return [
+        {"id": r[0], "reason": r[1], "issued_by": r[2], "created_at": r[3]}
+        for r in rows
+    ]
+
+
+def clear_active_warnings(guild_id: str, user_id: str) -> int:
+    """Đặt lại toàn bộ cảnh cáo đang hiệu lực của thành viên về đã xóa."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        cur = conn.execute(
+            """
+            UPDATE user_warnings
+            SET active = FALSE
+            WHERE guild_id = %s AND user_id = %s AND active = TRUE
+            """,
+            (guild_id, user_id),
+        )
+        return cur.rowcount
+
+
+def get_guild_max_warnings(guild_id: str) -> int:
+    """Lấy ngưỡng cảnh cáo tối đa trước khi tự động ban (mặc định: 3)."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        row = conn.execute(
+            "SELECT max_warnings FROM guild_mod_settings WHERE guild_id = %s",
+            (guild_id,),
+        ).fetchone()
+    return int(row[0]) if row and row[0] >= 1 else 3
+
+
+def set_guild_max_warnings(guild_id: str, max_warnings: int) -> None:
+    """Cập nhật ngưỡng cảnh cáo tối đa trước khi tự động ban."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        conn.execute(
+            """
+            INSERT INTO guild_mod_settings (guild_id, max_warnings, updated_at)
+            VALUES (%s, %s, now())
+            ON CONFLICT (guild_id) DO UPDATE SET
+                max_warnings = EXCLUDED.max_warnings,
+                updated_at = now()
+            """,
+            (guild_id, max(1, max_warnings)),
+        )

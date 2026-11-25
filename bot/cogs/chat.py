@@ -421,6 +421,11 @@ class Chat(commands.Cog):
         if message.author == self.bot.user:
             return
 
+        mod_cog = self.bot.get_cog("Moderation")
+        if mod_cog and message.guild and not mod_cog._is_exempt(message.author):
+            if await mod_cog.find_violation(message) is not None:
+                return
+
         ctx = await self.bot.get_context(message)
         if ctx.valid:
             return
