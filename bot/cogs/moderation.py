@@ -148,35 +148,67 @@ class Moderation(commands.Cog):
         self._filter_cache[guild_id] = rules
         return rules
 
+    @staticmethod
+    def _extract_message_payload(message: discord.Message) -> tuple[list[str], list]:
+        """Trích xuất toàn bộ nội dung văn bản và sticker từ tin nhắn gốc lẫn các snapshot được forward."""
+        contents: list[str] = []
+        stickers: list = []
+
+        if message.content:
+            contents.append(message.content)
+        if message.stickers:
+            stickers.extend(message.stickers)
+
+        snapshots = getattr(message, "message_snapshots", None) or []
+        for snap in snapshots:
+            snap_content = getattr(snap, "content", None)
+            if snap_content:
+                contents.append(snap_content)
+            snap_stickers = getattr(snap, "stickers", None)
+            if snap_stickers:
+                stickers.extend(snap_stickers)
+
+        if not snapshots and message.reference and getattr(message.reference, "type", None) == discord.MessageReferenceType.forward:
+            ref_cached = getattr(message.reference, "cached_message", None)
+            if ref_cached:
+                if ref_cached.content:
+                    contents.append(ref_cached.content)
+                if ref_cached.stickers:
+                    stickers.extend(ref_cached.stickers)
+
+        return contents, stickers
+
     async def find_violation(self, message: discord.Message) -> str | None:
-        """Kiểm tra tin nhắn có chứa sticker, emote hoặc từ bị cấm không. Trả về lý do nếu vi phạm."""
+        """Kiểm tra tin nhắn (kể cả nội dung forward) có chứa sticker, emote hoặc từ bị cấm không."""
         if not message.guild:
             return None
 
         rules = await self._get_guild_rules(message.guild.id)
+        contents, stickers = self._extract_message_payload(message)
 
         # 1. Kiểm tra Sticker bị cấm
-        for sticker in message.stickers:
+        for sticker in stickers:
             if str(sticker.id) in rules["sticker_ids"] or sticker.name.lower() in rules["sticker_names"]:
                 return f"Sử dụng sticker bị cấm: `{sticker.name}`"
 
-        content = message.content or ""
-        if not content:
+        if not contents:
             return None
 
+        combined_content = "\n".join(contents)
+
         # 2. Kiểm tra Custom Emote bị cấm (<:name:id> / <a:name:id>)
-        for name, emote_id in CUSTOM_EMOTE_RE.findall(content):
+        for name, emote_id in CUSTOM_EMOTE_RE.findall(combined_content):
             if emote_id in rules["emote_ids"] or name.lower() in rules["emote_names"]:
                 return f"Sử dụng emote bị cấm: `:{name}:`"
 
         # 3. Kiểm tra Unicode Emoji bị cấm
-        norm_content = content.replace("\ufe0f", "")
+        norm_content = combined_content.replace("\ufe0f", "")
         for u_val, u_label in rules["unicode_emotes"]:
             if u_val and u_val in norm_content:
                 return f"Sử dụng emote bị cấm: {u_label}"
 
         # 4. Kiểm tra Từ/Cụm từ bị cấm (loại bỏ mã custom emote trước để tránh bắt nhầm ID/tên emote)
-        text_only = CUSTOM_EMOTE_RE.sub(" ", content)
+        text_only = CUSTOM_EMOTE_RE.sub(" ", combined_content)
         for label, pattern in rules["word_patterns"]:
             if pattern.search(text_only):
                 return f"Sử dụng từ ngữ bị cấm: `{label}`"
@@ -436,7 +468,8 @@ class Moderation(commands.Cog):
         if not clean_arg and ctx.message.reference and ctx.message.reference.message_id:
             try:
                 ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
-                for s in ref_msg.stickers:
+                _, ref_stickers = self._extract_message_payload(ref_msg)
+                for s in ref_stickers:
                     targets.append((f"id:{s.id}", f"{s.name} (ID: {s.id})"))
                 if targets:
                     return targets
