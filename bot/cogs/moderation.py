@@ -794,34 +794,46 @@ class Moderation(commands.Cog):
     async def mod_help(self, ctx: commands.Context):
         """Hiển thị hướng dẫn các lệnh quản trị của LuLu."""
         embed = discord.Embed(
-            title="Hệ thống Quản trị của LuLu",
-            description="Tự động **xóa tin nhắn**, **nhắc nhở trực tiếp** và **Mute** khi vượt ngưỡng vi phạm.",
+            title="Bảng lệnh Quản trị",
+            description="Tự động xóa tin nhắn vi phạm, nhắc nhở trực tiếp và Mute khi vượt ngưỡng.",
             color=discord.Color.teal(),
         )
+        if self.bot.user:
+            embed.set_author(name=self.bot.user.display_name, icon_url=self.bot.user.display_avatar.url)
+
         embed.add_field(
-            name="Bộ lọc Từ / Emote / Sticker cấm",
+            name="Bộ lọc nội dung cấm",
             value=(
-                "`!banword <từ>` / `!unbanword <từ>` — Thêm/gỡ từ cấm\n"
-                "`!banemote <emote>` / `!unbanemote <emote>` — Thêm/gỡ emote cấm\n"
-                "`!bansticker [ID/tên]` / `!unbansticker [ID/tên]` — Thêm/gỡ sticker (hỗ trợ reply)\n"
-                "`!banlist` — Xem toàn bộ danh sách đang bị cấm"
+                "`!banword` / `!unbanword <từ>` — Thêm, gỡ từ cấm\n"
+                "`!banemote` / `!unbanemote <emote>` — Thêm, gỡ emote cấm\n"
+                "`!bansticker` / `!unbansticker [ID/tên]` — Thêm, gỡ sticker (có thể reply)\n"
+                "`!banlist` — Xem toàn bộ danh sách cấm và cấu hình"
             ),
             inline=False,
         )
         embed.add_field(
-            name="Cảnh cáo, Mute, Xóa & Ban",
+            name="Cảnh cáo & Ngưỡng",
             value=(
-                "`!warn @user [lý do]` — Cảnh cáo thủ công\n"
-                "`!warns [@user]` — Xem số lần cảnh cáo\n"
-                "`!clearwarn @user` — Xóa hết cảnh cáo cho thành viên\n"
-                "`!maxwarn [số]` — Đặt ngưỡng cảnh cáo tự động Mute (mặc định: 3)\n"
-                "`!mutetime [phút]` — Đặt thời gian tự động Mute (mặc định: 10 phút)\n"
-                "`!mute @user [phút] [lý do]` / `!unmute @user` — Mute hoặc gỡ Mute trực tiếp\n"
-                "`!ban @user [lý do]` / `!unban <ID>` — Ban hoặc gỡ Ban trực tiếp\n"
-                "`!purge <1-100>` — Xóa nhanh tin nhắn trong kênh"
+                "`!warn @user [lý do]` — Cảnh cáo\n"
+                "`!warns [@user]` — Xem cảnh cáo\n"
+                "`!clearwarn @user` — Xóa cảnh cáo\n"
+                "`!maxwarn [số]` — Ngưỡng Mute\n"
+                "`!mutetime [phút]` — Thời gian"
             ),
-            inline=False,
+            inline=True,
         )
+        embed.add_field(
+            name="Xử lý trực tiếp",
+            value=(
+                "`!mute @user [phút]` — Mute\n"
+                "`!unmute @user` — Gỡ Mute\n"
+                "`!ban @user [lý do]` — Ban\n"
+                "`!unban <ID>` — Gỡ Ban\n"
+                "`!purge <1-100>` — Xóa tin nhắn"
+            ),
+            inline=True,
+        )
+        embed.set_footer(text="Tiền tố: ! hoặc @LuLu  |  Yêu cầu quyền Quản trị viên hoặc Chỉ huy")
         await ctx.reply(embed=embed)
 
 
