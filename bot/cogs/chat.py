@@ -382,7 +382,6 @@ class Chat(commands.Cog):
         bot_id = str(bot_user.id) if bot_user else "bot"
         bot_name = bot_user.display_name if bot_user else "LuLu"
 
-        # Lưu raw text sạch (dạng :tên_emote:), tuyệt đối không lưu mã <...:ID> vào database
         await asyncio.to_thread(
             db.save_message,
             session_id,

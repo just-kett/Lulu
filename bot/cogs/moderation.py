@@ -265,12 +265,10 @@ class Moderation(commands.Cog):
         rules = await self._get_guild_rules(message.guild.id)
         contents, stickers, attachments, embeds = self._extract_message_payload(message)
 
-        # 1. Kiểm tra Sticker bị cấm
         for sticker in stickers:
             if str(sticker.id) in rules["sticker_ids"] or sticker.name.lower() in rules["sticker_names"]:
                 return f"Sử dụng sticker bị cấm: `{sticker.name}`"
 
-        # 2. Kiểm tra GIF đính kèm hoặc link/embed GIF bị cấm
         if rules["gif_keys"] or rules["gif_names"]:
             for att in attachments:
                 if not _is_gif_attachment(att):
@@ -304,18 +302,15 @@ class Moderation(commands.Cog):
 
         combined_content = "\n".join(contents)
 
-        # 3. Kiểm tra Custom Emote bị cấm (<:name:id> / <a:name:id>)
         for name, emote_id in CUSTOM_EMOTE_RE.findall(combined_content):
             if emote_id in rules["emote_ids"] or name.lower() in rules["emote_names"]:
                 return f"Sử dụng emote bị cấm: `:{name}:`"
 
-        # 4. Kiểm tra Unicode Emoji bị cấm
         norm_content = combined_content.replace("\ufe0f", "")
         for u_val, u_label in rules["unicode_emotes"]:
             if u_val and u_val in norm_content:
                 return f"Sử dụng emote bị cấm: {u_label}"
 
-        # 5. Kiểm tra Từ/Cụm từ bị cấm (loại bỏ mã custom emote trước để tránh bắt nhầm ID/tên emote)
         text_only = CUSTOM_EMOTE_RE.sub(" ", combined_content)
         for label, pattern in rules["word_patterns"]:
             if pattern.search(text_only):
@@ -499,8 +494,6 @@ class Moderation(commands.Cog):
             return False
         return True
 
-    # ---------------- QUẢN LÝ TỪ CẤM ----------------
-
     @commands.command(name='banword')
     async def ban_word(self, ctx: commands.Context, *, word: str = ""):
         """Thêm từ hoặc cụm từ vào danh sách cấm."""
@@ -547,8 +540,6 @@ class Moderation(commands.Cog):
             await ctx.reply(f"Dạ, em đã gỡ `{clean_word}` khỏi danh sách từ cấm rồi ạ.")
         else:
             await ctx.reply(f"Không tìm thấy từ `{clean_word}` trong danh sách từ cấm.")
-
-    # ---------------- QUẢN LÝ EMOTE CẤM ----------------
 
     @commands.command(name='banemote')
     async def ban_emote(self, ctx: commands.Context, *, emotes_text: str = ""):
@@ -634,8 +625,6 @@ class Moderation(commands.Cog):
         if not_found:
             parts.append("Không tìm thấy trong danh sách: " + ", ".join(not_found))
         await ctx.reply("\n".join(parts) if parts else "Không nhận diện được emote hợp lệ.")
-
-    # ---------------- QUẢN LÝ STICKER CẤM ----------------
 
     async def _resolve_stickers(self, ctx: commands.Context, arg: str) -> list[tuple[str, str]]:
         """Trích xuất sticker từ tin nhắn lệnh, tin nhắn được reply hoặc từ ID/tên."""
@@ -742,8 +731,6 @@ class Moderation(commands.Cog):
         if not_found:
             parts.append("Không tìm thấy trong danh sách: " + ", ".join(not_found))
         await ctx.reply("\n".join(parts))
-
-    # ---------------- QUẢN LÝ GIF CẤM ----------------
 
     async def _resolve_gifs(self, ctx: commands.Context, arg: str) -> list[tuple[str, str]]:
         """Trích xuất GIF từ file đính kèm, link trong tham số, hoặc tin nhắn được reply."""
@@ -938,8 +925,6 @@ class Moderation(commands.Cog):
             inline=False,
         )
         await ctx.reply(embed=embed)
-
-    # ---------------- LỆNH QUẢN TRỊ TRỰC TIẾP ----------------
 
     @commands.command(name='warn')
     async def warn_member(self, ctx: commands.Context, member: discord.Member, *, reason: str = "Vi phạm nội quy máy chủ"):
