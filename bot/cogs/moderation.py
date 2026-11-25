@@ -240,12 +240,9 @@ class Moderation(commands.Cog):
                 await message.channel.send(embed=embed)
             else:
                 embed = discord.Embed(
-                    title="Cảnh cáo vi phạm (Đạt ngưỡng Ban)",
+                    title="Cảnh cáo vi phạm",
                     description=(
-                        f"{author.mention}, tin nhắn của bạn vi phạm quy định{'' if deleted else delete_err}.\n"
-                        f"• **Lý do:** {reason}\n"
-                        f"• **Mức cảnh cáo:** **{warn_count}/{max_warnings}**\n"
-                        f"• **Không thể tự động Ban:** {ban_err}"
+                        f"Chỉ huy {author.mention}, đừng gửi mấy thứ biến thái nữa! '' if deleted else delete_err}.\n"
                     ),
                     color=discord.Color.dark_orange(),
                 )
@@ -293,7 +290,7 @@ class Moderation(commands.Cog):
 
     # ---------------- QUẢN LÝ TỪ CẤM ----------------
 
-    @commands.command(name='camtu', aliases=['banword', 'addword'])
+    @commands.command(name='banword')
     async def ban_word(self, ctx: commands.Context, *, word: str = ""):
         """Thêm từ hoặc cụm từ vào danh sách cấm."""
         if not await self._require_admin(ctx):
@@ -301,7 +298,7 @@ class Moderation(commands.Cog):
 
         clean_word = word.strip()
         if not clean_word:
-            await ctx.reply("Chỉ huy vui lòng nhập từ cần cấm, ví dụ: `!camtu từ_xấu`")
+            await ctx.reply("Chỉ huy vui lòng nhập từ cần cấm, ví dụ: `!banword từ_xấu`")
             return
 
         added = await asyncio.to_thread(
@@ -319,7 +316,7 @@ class Moderation(commands.Cog):
         else:
             await ctx.reply(f"Từ `{clean_word}` đã có sẵn trong danh sách cấm từ trước rồi ạ.")
 
-    @commands.command(name='botu', aliases=['unbanword', 'delword', 'removeword'])
+    @commands.command(name='unbanword')
     async def unban_word(self, ctx: commands.Context, *, word: str = ""):
         """Gỡ từ hoặc cụm từ khỏi danh sách cấm."""
         if not await self._require_admin(ctx):
@@ -327,7 +324,7 @@ class Moderation(commands.Cog):
 
         clean_word = word.strip()
         if not clean_word:
-            await ctx.reply("Chỉ huy vui lòng nhập từ cần gỡ, ví dụ: `!botu từ_xấu`")
+            await ctx.reply("Chỉ huy vui lòng nhập từ cần gỡ, ví dụ: `!unbanword từ_xấu`")
             return
 
         removed = await asyncio.to_thread(
@@ -342,7 +339,7 @@ class Moderation(commands.Cog):
 
     # ---------------- QUẢN LÝ EMOTE CẤM ----------------
 
-    @commands.command(name='camemote', aliases=['banemote', 'addemote', 'banemoji'])
+    @commands.command(name='banemote')
     async def ban_emote(self, ctx: commands.Context, *, emotes_text: str = ""):
         """Thêm emote (custom emote hoặc emoji mặc định) vào danh sách cấm."""
         if not await self._require_admin(ctx):
@@ -350,7 +347,7 @@ class Moderation(commands.Cog):
 
         tokens = emotes_text.strip().split()
         if not tokens:
-            await ctx.reply("Chỉ huy hãy gửi kèm emote muốn cấm, ví dụ: `!camemote <emote>` hoặc `!camemote <:ten_emote:id>`")
+            await ctx.reply("Chỉ huy hãy gửi kèm emote muốn cấm, ví dụ: `!banemote <emote>` hoặc `!banemote <:ten_emote:id>`")
             return
 
         added_labels = []
@@ -382,7 +379,7 @@ class Moderation(commands.Cog):
             parts.append("Đã có sẵn trong danh sách: " + ", ".join(existed_labels))
         await ctx.reply("\n".join(parts) if parts else "Không nhận diện được emote hợp lệ.")
 
-    @commands.command(name='boemote', aliases=['unbanemote', 'delemote', 'unbanemoji'])
+    @commands.command(name='unbanemote')
     async def unban_emote(self, ctx: commands.Context, *, emotes_text: str = ""):
         """Gỡ emote khỏi danh sách cấm."""
         if not await self._require_admin(ctx):
@@ -390,7 +387,7 @@ class Moderation(commands.Cog):
 
         tokens = emotes_text.strip().split()
         if not tokens:
-            await ctx.reply("Chỉ huy hãy nhập emote hoặc ID emote cần gỡ, ví dụ: `!boemote <emote>`")
+            await ctx.reply("Chỉ huy hãy nhập emote hoặc ID emote cần gỡ, ví dụ: `!unbanemote <emote>`")
             return
 
         removed_labels = []
@@ -455,7 +452,7 @@ class Moderation(commands.Cog):
                 targets.append((f"name:{clean_arg.lower()}", clean_arg))
         return targets
 
-    @commands.command(name='camsticker', aliases=['bansticker', 'addsticker'])
+    @commands.command(name='bansticker')
     async def ban_sticker(self, ctx: commands.Context, *, arg: str = ""):
         """Cấm sticker (bằng cách reply tin nhắn chứa sticker hoặc nhập ID/tên sticker)."""
         if not await self._require_admin(ctx):
@@ -464,7 +461,7 @@ class Moderation(commands.Cog):
         targets = await self._resolve_stickers(ctx, arg)
         if not targets:
             await ctx.reply(
-                "Chỉ huy hãy **reply** vào tin nhắn có sticker rồi gõ `!camsticker`, hoặc nhập tên/ID sticker (VD: `!camsticker Tên Sticker`)."
+                "Chỉ huy hãy **reply** vào tin nhắn có sticker rồi gõ `!bansticker`, hoặc nhập tên/ID sticker (VD: `!bansticker Tên Sticker`)."
             )
             return
 
@@ -493,7 +490,7 @@ class Moderation(commands.Cog):
             parts.append("Đã có sẵn trong danh sách: " + ", ".join(existed_labels))
         await ctx.reply("\n".join(parts))
 
-    @commands.command(name='bosticker', aliases=['unbansticker', 'delsticker'])
+    @commands.command(name='unbansticker')
     async def unban_sticker(self, ctx: commands.Context, *, arg: str = ""):
         """Gỡ sticker khỏi danh sách cấm."""
         if not await self._require_admin(ctx):
@@ -534,7 +531,7 @@ class Moderation(commands.Cog):
             parts.append("Không tìm thấy trong danh sách: " + ", ".join(not_found))
         await ctx.reply("\n".join(parts))
 
-    @commands.command(name='dscam', aliases=['banlist', 'filterlist', 'camlist'])
+    @commands.command(name='banlist')
     async def list_banned(self, ctx: commands.Context):
         """Hiển thị toàn bộ danh sách từ, emote, sticker đang bị cấm trong server."""
         if not await self._require_admin(ctx):
@@ -571,7 +568,7 @@ class Moderation(commands.Cog):
 
     # ---------------- LỆNH QUẢN TRỊ TRỰC TIẾP ----------------
 
-    @commands.command(name='warn', aliases=['canhcao'])
+    @commands.command(name='warn')
     async def warn_member(self, ctx: commands.Context, member: discord.Member, *, reason: str = "Vi phạm nội quy máy chủ"):
         """Gửi cảnh cáo thủ công tới thành viên và tự động ban nếu đạt ngưỡng."""
         if not await self._require_admin(ctx):
@@ -608,7 +605,7 @@ class Moderation(commands.Cog):
                 f"**Cảnh cáo** dành cho {member.mention} ({warn_count}/{max_warn})\n• **Lý do:** {reason}"
             )
 
-    @commands.command(name='warns', aliases=['checkwarn', 'warnings'])
+    @commands.command(name='warns')
     async def view_warnings(self, ctx: commands.Context, member: discord.Member | None = None):
         """Xem số lần và lịch sử cảnh cáo của bản thân hoặc thành viên."""
         if not ctx.guild:
@@ -638,7 +635,7 @@ class Moderation(commands.Cog):
         )
         await ctx.reply(embed=embed)
 
-    @commands.command(name='clearwarn', aliases=['resetwarn', 'unwarn'])
+    @commands.command(name='clearwarn')
     async def clear_warnings(self, ctx: commands.Context, member: discord.Member):
         """Xóa toàn bộ cảnh cáo đang hiệu lực cho một thành viên."""
         if not await self._require_admin(ctx):
@@ -714,7 +711,7 @@ class Moderation(commands.Cog):
         except discord.HTTPException as e:
             await ctx.reply(f"❌ Lỗi Discord API khi gỡ ban: {e}")
 
-    @commands.command(name='purge', aliases=['xoa', 'delmsg'])
+    @commands.command(name='purge')
     async def purge_messages(self, ctx: commands.Context, amount: int = 0):
         """Xóa nhanh N tin nhắn gần nhất trong kênh (từ 1 đến 100)."""
         if not await self._require_admin(ctx):
@@ -735,7 +732,7 @@ class Moderation(commands.Cog):
         except discord.HTTPException as e:
             await ctx.reply(f"❌ Không thể xóa tin nhắn: {e}")
 
-    @commands.command(name='modhelp', aliases=['helpmod'])
+    @commands.command(name='modhelp')
     async def mod_help(self, ctx: commands.Context):
         """Hiển thị hướng dẫn các lệnh quản trị của LuLu."""
         embed = discord.Embed(
@@ -746,10 +743,10 @@ class Moderation(commands.Cog):
         embed.add_field(
             name="Bộ lọc Từ / Emote / Sticker cấm",
             value=(
-                "`!camtu <từ>` / `!botu <từ>` — Thêm/gỡ từ cấm\n"
-                "`!camemote <emote>` / `!boemote <emote>` — Thêm/gỡ emote cấm\n"
-                "`!camsticker [ID/tên]` / `!bosticker [ID/tên]` — Thêm/gỡ sticker (hỗ trợ reply)\n"
-                "`!dscam` — Xem toàn bộ danh sách đang bị cấm"
+                "`!banword <từ>` / `!unbanword <từ>` — Thêm/gỡ từ cấm\n"
+                "`!banemote <emote>` / `!unbanemote <emote>` — Thêm/gỡ emote cấm\n"
+                "`!bansticker [ID/tên]` / `!unbansticker [ID/tên]` — Thêm/gỡ sticker (hỗ trợ reply)\n"
+                "`!banlist` — Xem toàn bộ danh sách đang bị cấm"
             ),
             inline=False,
         )
@@ -761,7 +758,7 @@ class Moderation(commands.Cog):
                 "`!clearwarn @user` — Xóa hết cảnh cáo cho thành viên\n"
                 "`!maxwarn [số]` — Đặt ngưỡng cảnh cáo tự động Ban (mặc định: 3)\n"
                 "`!ban @user [lý do]` / `!unban <ID>` — Ban hoặc gỡ Ban trực tiếp\n"
-                "`!purge <1-100>` (hoặc `!xoa`) — Xóa nhanh tin nhắn trong kênh"
+                "`!purge <1-100>` — Xóa nhanh tin nhắn trong kênh"
             ),
             inline=False,
         )
