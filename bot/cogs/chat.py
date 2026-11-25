@@ -305,30 +305,23 @@ class Chat(commands.Cog):
         print(f"[LuLu Debug] Session: {session_id} | Người nói: {author_name} ({'Chỉ huy' if is_cmd else 'Thành viên'}) | Emote: {len(emoji_mention_map)}")
 
         clean_user_prompt = re.sub(r'<a?:([a-zA-Z0-9_]+):[^>]*>', r':\1:', formatted_prompt)
-        await asyncio.to_thread(
-            db.save_message,
-            session_id,
-            "user",
-            clean_user_prompt,
-            author_id,
-            author_name,
-        )
         history = await asyncio.to_thread(db.load_history, session_id)
         clean_history = self._sanitize_history_for_llm(history)
+        llm_history = clean_history + [{"role": "user", "content": clean_user_prompt}]
 
         try:
             async with message.channel.typing():
                 raw_answer = await asyncio.to_thread(
                     ask_llm,
-                    prompt=prompt,
-                    history=clean_history,
+                    prompt=clean_user_prompt,
+                    history=llm_history,
                     extra_instruction=full_extra_instruction,
                 )
         except Exception:
             raw_answer = await asyncio.to_thread(
                 ask_llm,
-                prompt=prompt,
-                history=clean_history,
+                prompt=clean_user_prompt,
+                history=llm_history,
                 extra_instruction=full_extra_instruction,
             )
 
@@ -383,9 +376,11 @@ class Chat(commands.Cog):
         bot_name = bot_user.display_name if bot_user else "LuLu"
 
         await asyncio.to_thread(
-            db.save_message,
+            db.save_message_pair,
             session_id,
-            "remi",
+            clean_user_prompt,
+            author_id,
+            author_name,
             raw_answer,
             bot_id,
             bot_name,
@@ -408,11 +403,18 @@ class Chat(commands.Cog):
     async def _answer(self, user_id: str, prompt: str) -> str:
         """Hàm dự phòng tương thích ngược."""
         clean_prompt = re.sub(r'<a?:([a-zA-Z0-9_]+):[^>]*>', r':\1:', prompt)
-        await asyncio.to_thread(db.save_message, user_id, "user", clean_prompt)
         history = await asyncio.to_thread(db.load_history, user_id)
         clean_history = self._sanitize_history_for_llm(history)
-        answer = await asyncio.to_thread(ask_llm, prompt=prompt, history=clean_history)
-        await asyncio.to_thread(db.save_message, user_id, "remi", answer)
+        llm_history = clean_history + [{"role": "user", "content": clean_prompt}]
+        answer = await asyncio.to_thread(ask_llm, prompt=clean_prompt, history=llm_history)
+        await asyncio.to_thread(
+            db.save_message_pair,
+            user_id,
+            clean_prompt,
+            user_id,
+            user_id,
+            answer,
+        )
         return answer
 
     @commands.Cog.listener()

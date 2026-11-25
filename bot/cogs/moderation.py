@@ -2,6 +2,7 @@ import asyncio
 from datetime import timedelta
 import os
 import re
+import unicodedata
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -58,6 +59,96 @@ def _is_gif_attachment(att) -> bool:
     return fname.endswith(".gif") or "gif" in ctype
 
 
+def _split_unicode_emojis(token: str) -> list[str]:
+    """Tách chuỗi gồm nhiều emoji Unicode viết liền nhau thành từng emoji độc lập."""
+    clusters: list[str] = []
+    i = 0
+    n = len(token)
+    while i < n:
+        ch = token[i]
+        o = ord(ch)
+        if 0x1F1E6 <= o <= 0x1F1FF and i + 1 < n and 0x1F1E6 <= ord(token[i + 1]) <= 0x1F1FF:
+            clusters.append(token[i:i + 2])
+            i += 2
+            continue
+        cluster = ch
+        i += 1
+        while i < n:
+            nxt = token[i]
+            no = ord(nxt)
+            if nxt in ("\ufe0f", "\ufe0e", "\u20e3") or (0x1F3FB <= no <= 0x1F3FF):
+                cluster += nxt
+                i += 1
+            elif nxt == "\u200d" and i + 1 < n:
+                cluster += nxt + token[i + 1]
+                i += 2
+            else:
+                break
+        clusters.append(cluster)
+    return clusters
+
+
+def _is_emoji_cluster(cluster: str) -> bool:
+    for ch in cluster:
+        o = ord(ch)
+        if ch == "\u20e3" or (0x1F1E6 <= o <= 0x1F1FF):
+            return True
+        if o > 127 and unicodedata.category(ch)[0] == "S":
+            return True
+    return False
+
+
+def _extract_emote_targets(raw_text: str, allow_plain_names: bool = True) -> list[tuple[str, str]]:
+    """Trích xuất nhiều emote/emoji từ một chuỗi (hỗ trợ viết liền, cách khoảng trắng, dấu phẩy hoặc xuống dòng)."""
+    targets: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(val: str, label: str) -> None:
+        if val not in seen:
+            seen.add(val)
+            targets.append((val, label))
+
+    cleaned_text = URL_RE.sub(" ", raw_text)
+
+    for m in CUSTOM_EMOTE_RE.finditer(cleaned_text):
+        name, emote_id = m.group(1), m.group(2)
+        add(f"id:{emote_id}", f":{name}: (ID: {emote_id})")
+
+    remaining = CUSTOM_EMOTE_RE.sub(" ", cleaned_text)
+
+    named_re = re.compile(r':([a-zA-Z0-9_]+):')
+    for m in named_re.finditer(remaining):
+        name = m.group(1)
+        add(f"name:{name.lower()}", f":{name}:")
+
+    remaining = named_re.sub(" ", remaining)
+
+    for part in re.split(r'[\s,;]+', remaining):
+        part = part.strip()
+        if not part:
+            continue
+        if part.isdigit() and len(part) >= 15:
+            add(f"id:{part}", f"Emote ID: {part}")
+        elif allow_plain_names and part.isascii() and re.fullmatch(r'[a-zA-Z0-9_]+', part):
+            add(f"name:{part.lower()}", f":{part}:")
+        else:
+            for cluster in _split_unicode_emojis(part):
+                if not _is_emoji_cluster(cluster):
+                    continue
+                norm = cluster.replace("\ufe0f", "")
+                if norm:
+                    add(f"unicode:{norm}", cluster)
+
+    return targets
+
+
+def _format_batch_reply(lines: list[str], limit: int = 1900) -> str:
+    text = "\n".join(lines)
+    if len(text) > limit:
+        return text[:limit].rstrip() + "..."
+    return text
+
+
 def _compile_word_pattern(word: str) -> re.Pattern:
     """Biên dịch regex bắt từ/cụm từ bị cấm theo ranh giới từ để tránh bắt nhầm từ ghép."""
     clean = word.strip()
@@ -66,29 +157,6 @@ def _compile_word_pattern(word: str) -> re.Pattern:
     prefix = r"(?<!\w)" if (clean[0].isalnum() or clean[0] == "_") else ""
     suffix = r"(?!\w)" if (clean[-1].isalnum() or clean[-1] == "_") else ""
     return re.compile(f"{prefix}{escaped}{suffix}", re.IGNORECASE | re.UNICODE)
-
-
-def _parse_emote_token(raw: str) -> tuple[str, str] | None:
-    """Chuẩn hóa đầu vào emote thành (item_value, display_label)."""
-    token = raw.strip()
-    if not token:
-        return None
-
-    m = CUSTOM_EMOTE_RE.fullmatch(token)
-    if m:
-        name, emote_id = m.group(1), m.group(2)
-        return f"id:{emote_id}", f":{name}: (ID: {emote_id})"
-
-    if token.isdigit() and len(token) >= 15:
-        return f"id:{token}", f"Emote ID: {token}"
-
-    if token.startswith(":") and token.endswith(":") and len(token) > 2:
-        name = token[1:-1].strip()
-        if name:
-            return f"name:{name.lower()}", f":{name}:"
-
-    norm_unicode = token.replace("\ufe0f", "")
-    return f"unicode:{norm_unicode}", token
 
 
 class Moderation(commands.Cog):
@@ -541,24 +609,36 @@ class Moderation(commands.Cog):
         else:
             await ctx.reply(f"Không tìm thấy từ `{clean_word}` trong danh sách từ cấm.")
 
+    async def _resolve_emotes(self, ctx: commands.Context, emotes_text: str) -> list[tuple[str, str]]:
+        """Trích xuất danh sách emote từ tham số nhập vào hoặc từ tin nhắn được reply."""
+        clean_text = emotes_text.strip()
+        if clean_text:
+            return _extract_emote_targets(clean_text)
+
+        if ctx.message.reference and ctx.message.reference.message_id:
+            try:
+                ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+                ref_contents, _, _, _ = self._extract_message_payload(ref_msg)
+                if ref_contents:
+                    return _extract_emote_targets(" ".join(ref_contents), allow_plain_names=False)
+            except Exception:
+                pass
+        return []
+
     @commands.command(name='banemote')
     async def ban_emote(self, ctx: commands.Context, *, emotes_text: str = ""):
-        """Thêm emote (custom emote hoặc emoji mặc định) vào danh sách cấm."""
+        """Thêm một hoặc nhiều emote (custom emote hoặc emoji mặc định) vào danh sách cấm."""
         if not await self._require_admin(ctx):
             return
 
-        tokens = emotes_text.strip().split()
-        if not tokens:
-            await ctx.reply("Chỉ huy hãy gửi kèm emote muốn cấm, ví dụ: `!banemote <emote>` hoặc `!banemote <:ten_emote:id>`")
+        targets = await self._resolve_emotes(ctx, emotes_text)
+        if not targets:
+            await ctx.reply("Chỉ huy hãy gửi kèm một hoặc nhiều emote muốn cấm, ví dụ: `!banemote <emote1> <emote2>` (hoặc reply tin nhắn chứa emote).")
             return
 
         added_labels = []
         existed_labels = []
-        for tok in tokens:
-            parsed = _parse_emote_token(tok)
-            if not parsed:
-                continue
-            val, label = parsed
+        for val, label in targets:
             added = await asyncio.to_thread(
                 db.add_banned_item,
                 str(ctx.guild.id),
@@ -576,31 +656,27 @@ class Moderation(commands.Cog):
 
         parts = []
         if added_labels:
-            parts.append("Đã thêm emote cấm: " + ", ".join(added_labels))
+            parts.append(f"Đã thêm {len(added_labels)} emote cấm: " + ", ".join(added_labels))
         if existed_labels:
             parts.append("Đã có sẵn trong danh sách: " + ", ".join(existed_labels))
-        await ctx.reply("\n".join(parts) if parts else "Không nhận diện được emote hợp lệ.")
+        await ctx.reply(_format_batch_reply(parts) if parts else "Không nhận diện được emote hợp lệ.")
 
     @commands.command(name='unbanemote')
     async def unban_emote(self, ctx: commands.Context, *, emotes_text: str = ""):
-        """Gỡ emote khỏi danh sách cấm."""
+        """Gỡ một hoặc nhiều emote khỏi danh sách cấm."""
         if not await self._require_admin(ctx):
             return
 
-        tokens = emotes_text.strip().split()
-        if not tokens:
-            await ctx.reply("Chỉ huy hãy nhập emote hoặc ID emote cần gỡ, ví dụ: `!unbanemote <emote>`")
+        targets = await self._resolve_emotes(ctx, emotes_text)
+        if not targets:
+            await ctx.reply("Chỉ huy hãy nhập một hoặc nhiều emote/ID emote cần gỡ, ví dụ: `!unbanemote <emote1> <emote2>`")
             return
 
         removed_labels = []
         not_found = []
         current_items = await asyncio.to_thread(db.list_banned_items, str(ctx.guild.id), "emote")
 
-        for tok in tokens:
-            parsed = _parse_emote_token(tok)
-            if not parsed:
-                continue
-            val, label = parsed
+        for val, label in targets:
             removed = await asyncio.to_thread(db.remove_banned_item, str(ctx.guild.id), "emote", val)
             if not removed and val.startswith("name:"):
                 target_name = val[5:]
@@ -621,10 +697,10 @@ class Moderation(commands.Cog):
 
         parts = []
         if removed_labels:
-            parts.append("Đã gỡ emote cấm: " + ", ".join(removed_labels))
+            parts.append(f"Đã gỡ {len(removed_labels)} emote cấm: " + ", ".join(removed_labels))
         if not_found:
             parts.append("Không tìm thấy trong danh sách: " + ", ".join(not_found))
-        await ctx.reply("\n".join(parts) if parts else "Không nhận diện được emote hợp lệ.")
+        await ctx.reply(_format_batch_reply(parts) if parts else "Không nhận diện được emote hợp lệ.")
 
     async def _resolve_stickers(self, ctx: commands.Context, arg: str) -> list[tuple[str, str]]:
         """Trích xuất sticker từ tin nhắn lệnh, tin nhắn được reply hoặc từ ID/tên."""
@@ -733,7 +809,7 @@ class Moderation(commands.Cog):
         await ctx.reply("\n".join(parts))
 
     async def _resolve_gifs(self, ctx: commands.Context, arg: str) -> list[tuple[str, str]]:
-        """Trích xuất GIF từ file đính kèm, link trong tham số, hoặc tin nhắn được reply."""
+        """Trích xuất nhiều GIF cùng lúc từ file đính kèm, các link/tên/ID trong tham số, hoặc tin nhắn được reply."""
         targets: list[tuple[str, str]] = []
         seen_vals: set[str] = set()
 
@@ -752,25 +828,25 @@ class Moderation(commands.Cog):
                     parsed = _parse_gif_url(att.url)
                     if parsed:
                         add_target(*parsed)
-        if targets:
-            return targets
 
         clean_arg = arg.strip()
         if clean_arg:
-            urls = URL_RE.findall(clean_arg)
-            if urls:
-                for u in urls:
-                    parsed = _parse_gif_url(u)
-                    if parsed:
-                        add_target(*parsed)
-                return targets
-            if clean_arg.isdigit() and len(clean_arg) >= 8:
-                add_target(f"tenor:{clean_arg}", f"Tenor ID: {clean_arg}")
-            else:
-                add_target(f"name:{clean_arg.lower()}", clean_arg)
-            return targets
+            for u in URL_RE.findall(clean_arg):
+                parsed = _parse_gif_url(u)
+                if parsed:
+                    add_target(*parsed)
 
-        if ctx.message.reference and ctx.message.reference.message_id:
+            remaining = URL_RE.sub(" ", clean_arg)
+            for part in re.split(r'[\s,;]+', remaining):
+                part = part.strip()
+                if not part:
+                    continue
+                if part.isdigit() and len(part) >= 8:
+                    add_target(f"tenor:{part}", f"Tenor ID: {part}")
+                else:
+                    add_target(f"name:{part.lower()}", part)
+
+        if ctx.message.reference and ctx.message.reference.message_id and not clean_arg:
             try:
                 ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
                 ref_contents, _, ref_atts, ref_embeds = self._extract_message_payload(ref_msg)
@@ -786,14 +862,15 @@ class Moderation(commands.Cog):
                             if parsed:
                                 add_target(*parsed)
 
-                if not targets:
-                    for text in ref_contents:
-                        for u in URL_RE.findall(text):
-                            parsed = _parse_gif_url(u)
-                            if parsed:
-                                add_target(*parsed)
+                found_from_text = False
+                for text in ref_contents:
+                    for u in URL_RE.findall(text):
+                        parsed = _parse_gif_url(u)
+                        if parsed:
+                            add_target(*parsed)
+                            found_from_text = True
 
-                if not targets:
+                if not found_from_text:
                     for emb in ref_embeds:
                         for emb_url in self._iter_embed_urls(emb):
                             parsed = _parse_gif_url(emb_url)
@@ -807,14 +884,14 @@ class Moderation(commands.Cog):
 
     @commands.command(name='bangif')
     async def ban_gif(self, ctx: commands.Context, *, arg: str = ""):
-        """Cấm một GIF cụ thể (reply vào GIF, gửi kèm file .gif hoặc dán link Tenor/Giphy)."""
+        """Cấm một hoặc nhiều GIF cùng lúc (reply tin nhắn, gửi kèm nhiều file .gif, hoặc dán nhiều link Tenor/Giphy)."""
         if not await self._require_admin(ctx):
             return
 
         targets = await self._resolve_gifs(ctx, arg)
         if not targets:
             await ctx.reply(
-                "Chỉ huy hãy **reply** vào tin nhắn chứa GIF rồi gõ `!bangif`, gửi kèm file `.gif`, hoặc dán link GIF (VD: `!bangif https://tenor.com/view/...`)."
+                "Chỉ huy hãy **reply** vào tin nhắn chứa GIF rồi gõ `!bangif`, gửi kèm một/nhiều file `.gif`, hoặc dán nhiều link GIF cách nhau bằng khoảng trắng/xuống dòng."
             )
             return
 
@@ -838,20 +915,20 @@ class Moderation(commands.Cog):
 
         parts = []
         if added_labels:
-            parts.append("Đã thêm GIF cấm: " + ", ".join(added_labels))
+            parts.append(f"Đã thêm {len(added_labels)} GIF cấm: " + ", ".join(added_labels))
         if existed_labels:
             parts.append("Đã có sẵn trong danh sách: " + ", ".join(existed_labels))
-        await ctx.reply("\n".join(parts))
+        await ctx.reply(_format_batch_reply(parts))
 
     @commands.command(name='unbangif')
     async def unban_gif(self, ctx: commands.Context, *, arg: str = ""):
-        """Gỡ GIF khỏi danh sách cấm."""
+        """Gỡ một hoặc nhiều GIF khỏi danh sách cấm."""
         if not await self._require_admin(ctx):
             return
 
         targets = await self._resolve_gifs(ctx, arg)
         if not targets:
-            await ctx.reply("Chỉ huy hãy **reply** vào GIF hoặc nhập link/tên GIF cần gỡ.")
+            await ctx.reply("Chỉ huy hãy **reply** vào GIF hoặc nhập một/nhiều link/tên GIF cần gỡ.")
             return
 
         current_items = await asyncio.to_thread(db.list_banned_items, str(ctx.guild.id), "gif")
@@ -879,10 +956,10 @@ class Moderation(commands.Cog):
 
         parts = []
         if removed_labels:
-            parts.append("Đã gỡ GIF cấm: " + ", ".join(removed_labels))
+            parts.append(f"Đã gỡ {len(removed_labels)} GIF cấm: " + ", ".join(removed_labels))
         if not_found:
             parts.append("Không tìm thấy trong danh sách: " + ", ".join(not_found))
-        await ctx.reply("\n".join(parts))
+        await ctx.reply(_format_batch_reply(parts))
 
     @commands.command(name='banlist')
     async def list_banned(self, ctx: commands.Context):

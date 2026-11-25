@@ -10,12 +10,22 @@ system_prompt = os.getenv("SYSTEM_PROMPT")
 client = genai.Client(api_key=llm_token)
 
 def _to_contents(history: list[dict]) -> list[types.Content]:
-    contents = []
+    contents: list[types.Content] = []
     for item in history:
-        role = "user" if item["role"] == "user" else "model"
-        contents.append(
-            types.Content(role=role, parts=[types.Part(text=item["content"])])
-        )
+        text = (item.get("content") or "").strip()
+        if not text:
+            continue
+        role = "user" if item.get("role") == "user" else "model"
+        if contents and contents[-1].role == role:
+            prev_text = contents[-1].parts[0].text or ""
+            contents[-1] = types.Content(
+                role=role,
+                parts=[types.Part(text=f"{prev_text}\n{text}")],
+            )
+        else:
+            contents.append(
+                types.Content(role=role, parts=[types.Part(text=text)])
+            )
     return contents
 
 def ask_llm(

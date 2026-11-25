@@ -1,15 +1,73 @@
+from contextlib import contextmanager
 import os
+import queue
+import time
 import psycopg
 from dotenv import load_dotenv
 
 load_dotenv()
 
 DATABASE_URL = os.environ["DATABASE_URL"]
-MAX_MESSAGES = 20
+MAX_MESSAGES = 36
+HISTORY_TTL_HOURS = 24
+MAX_CONN_AGE_SECONDS = 240
+_POOL: queue.LifoQueue[tuple[psycopg.Connection, float]] = queue.LifoQueue(maxsize=4)
+
+
+def _close_quietly(conn: psycopg.Connection) -> None:
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def _return_to_pool(conn: psycopg.Connection) -> None:
+    if conn.closed or conn.broken:
+        _close_quietly(conn)
+        return
+    try:
+        _POOL.put_nowait((conn, time.monotonic()))
+    except queue.Full:
+        _close_quietly(conn)
+
+
+@contextmanager
+def _db_conn():
+    conn = None
+    now = time.monotonic()
+    while not _POOL.empty():
+        try:
+            candidate, last_used = _POOL.get_nowait()
+        except queue.Empty:
+            break
+        if candidate.closed or candidate.broken or (now - last_used > MAX_CONN_AGE_SECONDS):
+            _close_quietly(candidate)
+            continue
+        if now - last_used > 30:
+            try:
+                with candidate.transaction():
+                    candidate.execute("SELECT 1")
+            except Exception:
+                _close_quietly(candidate)
+                continue
+        conn = candidate
+        break
+
+    if conn is None:
+        conn = psycopg.connect(DATABASE_URL, autocommit=True)
+
+    try:
+        with conn.transaction():
+            yield conn
+    except Exception:
+        _close_quietly(conn)
+        raise
+    else:
+        _return_to_pool(conn)
 
 
 def init_db() -> None:
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS messages (
@@ -29,6 +87,12 @@ def init_db() -> None:
         )
         conn.execute(
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS author_name TEXT;"
+        )
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS target_user_id TEXT;"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_session_created ON messages(user_id, created_at DESC, id DESC)"
         )
 
         conn.execute(
@@ -99,14 +163,15 @@ def save_message(
     content: str,
     author_id: str | None = None,
     author_name: str | None = None,
+    target_user_id: str | None = None,
 ) -> None:
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         conn.execute(
             """
-            INSERT INTO messages (user_id, role, content, author_id, author_name)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO messages (user_id, role, content, author_id, author_name, target_user_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
-            (session_id, role, content, author_id, author_name),
+            (session_id, role, content, author_id, author_name, target_user_id),
         )
         conn.execute(
             """
@@ -123,11 +188,53 @@ def save_message(
         )
 
 
-def load_history(session_id: str) -> list[dict]:
-    with psycopg.connect(DATABASE_URL) as conn:
+def save_message_pair(
+    session_id: str,
+    user_content: str,
+    user_author_id: str,
+    user_author_name: str,
+    model_content: str,
+    bot_id: str = "bot",
+    bot_name: str = "LuLu",
+) -> None:
+    with _db_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO messages (user_id, role, content, author_id, author_name, target_user_id)
+            VALUES (%s, 'user', %s, %s, %s, %s),
+                   (%s, 'model', %s, %s, %s, %s)
+            """,
+            (
+                session_id, user_content, user_author_id, user_author_name, user_author_id,
+                session_id, model_content, bot_id, bot_name, user_author_id,
+            ),
+        )
+        conn.execute(
+            """
+            DELETE FROM messages
+            WHERE user_id = %s
+              AND id NOT IN (
+                  SELECT id FROM messages
+                  WHERE user_id = %s
+                  ORDER BY id DESC
+                  LIMIT %s
+                )
+            """,
+            (session_id, session_id, MAX_MESSAGES),
+        )
+
+
+def load_history(session_id: str, max_age_hours: int = HISTORY_TTL_HOURS) -> list[dict]:
+    with _db_conn() as conn:
         rows = conn.execute(
-            "SELECT role, content FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT %s",
-            (session_id, MAX_MESSAGES),
+            """
+            SELECT role, content FROM messages
+            WHERE user_id = %s
+              AND created_at >= now() - (%s * interval '1 hour')
+            ORDER BY id DESC
+            LIMIT %s
+            """,
+            (session_id, max_age_hours, MAX_MESSAGES),
         ).fetchall()
 
     history = [{"role": role, "content": content} for role, content in reversed(rows)]
@@ -138,11 +245,14 @@ def load_history(session_id: str) -> list[dict]:
 
 
 def clear_history(session_id: str, author_id: str | None = None) -> None:
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         if author_id:
             conn.execute(
-                "DELETE FROM messages WHERE user_id = %s AND author_id = %s",
-                (session_id, author_id),
+                """
+                DELETE FROM messages
+                WHERE user_id = %s AND (author_id = %s OR target_user_id = %s)
+                """,
+                (session_id, author_id, author_id),
             )
         else:
             conn.execute(
@@ -151,7 +261,7 @@ def clear_history(session_id: str, author_id: str | None = None) -> None:
             )
 
 def get_user_memory(user_id: str) -> dict | None:
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         row = conn.execute(
             "SELECT user_id, display_name, role_type, notes FROM user_memories WHERE user_id = %s",
             (user_id,),
@@ -172,7 +282,7 @@ def upsert_user_memory(
     role_type: str = "member",
     notes: str = "",
 ) -> None:
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         conn.execute(
             """
             INSERT INTO user_memories (user_id, display_name, role_type, notes, updated_at)
@@ -193,7 +303,7 @@ def set_user_notes(
     notes: str,
     role_type: str = "member",
 ) -> None:
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         conn.execute(
             """
             INSERT INTO user_memories (user_id, display_name, role_type, notes, updated_at)
@@ -223,7 +333,7 @@ def append_user_note(
     if not clean_note:
         return False, ""
 
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         row = conn.execute(
             "SELECT notes, display_name, role_type FROM user_memories WHERE user_id = %s",
             (user_id,),
@@ -266,7 +376,7 @@ def append_user_note(
 
 
 def reset_user_memory(user_id: str) -> None:
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         conn.execute("DELETE FROM user_memories WHERE user_id = %s", (user_id,))
 
 
@@ -278,7 +388,7 @@ def add_banned_item(
     created_by: str = "",
 ) -> bool:
     """Thêm một từ, emote hoặc sticker vào danh sách cấm của server. Trả về True nếu mới thêm."""
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         cur = conn.execute(
             """
             INSERT INTO banned_items (guild_id, item_type, item_value, display_label, created_by)
@@ -292,7 +402,7 @@ def add_banned_item(
 
 def remove_banned_item(guild_id: str, item_type: str, item_value: str) -> bool:
     """Gỡ một mục khỏi danh sách cấm theo guild_id, item_type, item_value."""
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         cur = conn.execute(
             """
             DELETE FROM banned_items
@@ -305,7 +415,7 @@ def remove_banned_item(guild_id: str, item_type: str, item_value: str) -> bool:
 
 def list_banned_items(guild_id: str, item_type: str | None = None) -> list[dict]:
     """Lấy danh sách các mục bị cấm của một server."""
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         if item_type:
             rows = conn.execute(
                 """
@@ -340,7 +450,7 @@ def list_banned_items(guild_id: str, item_type: str | None = None) -> list[dict]
 
 def add_warning(guild_id: str, user_id: str, reason: str, issued_by: str = "auto") -> int:
     """Ghi nhận một lần cảnh cáo mới và trả về tổng số cảnh cáo đang hiệu lực."""
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         conn.execute(
             """
             INSERT INTO user_warnings (guild_id, user_id, reason, issued_by, active)
@@ -360,7 +470,7 @@ def add_warning(guild_id: str, user_id: str, reason: str, issued_by: str = "auto
 
 def get_active_warnings(guild_id: str, user_id: str) -> list[dict]:
     """Lấy danh sách các lần cảnh cáo đang hiệu lực của thành viên."""
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         rows = conn.execute(
             """
             SELECT id, reason, issued_by, created_at
@@ -378,7 +488,7 @@ def get_active_warnings(guild_id: str, user_id: str) -> list[dict]:
 
 def clear_active_warnings(guild_id: str, user_id: str) -> int:
     """Đặt lại toàn bộ cảnh cáo đang hiệu lực của thành viên về đã xóa."""
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         cur = conn.execute(
             """
             UPDATE user_warnings
@@ -392,7 +502,7 @@ def clear_active_warnings(guild_id: str, user_id: str) -> int:
 
 def get_guild_max_warnings(guild_id: str) -> int:
     """Lấy ngưỡng cảnh cáo tối đa trước khi tự động ban (mặc định: 3)."""
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         row = conn.execute(
             "SELECT max_warnings FROM guild_mod_settings WHERE guild_id = %s",
             (guild_id,),
@@ -402,7 +512,7 @@ def get_guild_max_warnings(guild_id: str) -> int:
 
 def set_guild_max_warnings(guild_id: str, max_warnings: int) -> None:
     """Cập nhật ngưỡng cảnh cáo tối đa trước khi tự động mute."""
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         conn.execute(
             """
             INSERT INTO guild_mod_settings (guild_id, max_warnings, updated_at)
@@ -417,7 +527,7 @@ def set_guild_max_warnings(guild_id: str, max_warnings: int) -> None:
 
 def get_guild_mute_minutes(guild_id: str) -> int:
     """Lấy thời gian mute mặc định (phút) khi vượt ngưỡng cảnh cáo (mặc định: 10)."""
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         row = conn.execute(
             "SELECT mute_minutes FROM guild_mod_settings WHERE guild_id = %s",
             (guild_id,),
@@ -428,7 +538,7 @@ def get_guild_mute_minutes(guild_id: str) -> int:
 def set_guild_mute_minutes(guild_id: str, mute_minutes: int) -> None:
     """Cập nhật thời gian mute (phút, tối đa 40320 phút = 28 ngày theo giới hạn Discord)."""
     clamped = max(1, min(40320, mute_minutes))
-    with psycopg.connect(DATABASE_URL) as conn:
+    with _db_conn() as conn:
         conn.execute(
             """
             INSERT INTO guild_mod_settings (guild_id, mute_minutes, updated_at)
