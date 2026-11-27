@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import time
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -17,12 +18,23 @@ EMOJI_GUILD_ID = int(raw_emoji_guild) if raw_emoji_guild.isdigit() else None
 raw_commander = os.getenv('COMMANDER_ID', '').strip().strip('"').strip("'")
 COMMANDER_ID = int(raw_commander) if raw_commander.isdigit() else None
 
+CLEAR_REJECT_RE = re.compile(
+    r'\b(?:không\s+đồng\s+ý|ko\s+đồng\s+ý|k\s+đồng\s+ý|từ\s+chối|không|ko|no|hủy|reject|cancel)\b',
+    re.IGNORECASE | re.UNICODE,
+)
+CLEAR_APPROVE_RE = re.compile(
+    r'\b(?:đồng\s+ý|được|duyệt|ok|oke|okay|yes|ừ|ờ|approve)\b',
+    re.IGNORECASE | re.UNICODE,
+)
+
 
 class Chat(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.emoji_guild_id = EMOJI_GUILD_ID
         self.commander_id = COMMANDER_ID
+        self._pending_clears: dict[tuple[str, int], float] = {}
+        self._pending_clear_requests: dict[int, dict] = {}
 
     async def cog_load(self):
         await asyncio.to_thread(db.init_db)
@@ -431,6 +443,10 @@ class Chat(commands.Cog):
         if ctx.valid:
             return
 
+        if message.reference and message.reference.message_id in self._pending_clear_requests:
+            await self._handle_clear_reply(message)
+            return
+
         if "hey lucia" in message.content.lower() or "hey lulu" in message.content.lower():
             await self._respond(message, message.content)
 
@@ -447,6 +463,44 @@ class Chat(commands.Cog):
             await self._respond(message, prompt)
 
         await self.bot.process_commands(message)
+
+    async def _handle_clear_reply(self, message: discord.Message) -> None:
+        """Xử lý phản hồi đồng ý hoặc không đồng ý của Chỉ huy Kett đối với yêu cầu !clear."""
+        ref_id = message.reference.message_id
+        req = self._pending_clear_requests.get(ref_id)
+        if not req:
+            return
+
+        if not self._is_commander(message.author):
+            await message.reply("Chỉ có Chỉ huy Kett mới có quyền đồng ý hoặc không đồng ý yêu cầu xóa dữ liệu này ạ.")
+            return
+
+        session_id = req["session_id"]
+        requester = req["requester"]
+        pending_key = (session_id, requester.id)
+
+        if time.monotonic() > req["expires_at"]:
+            self._pending_clear_requests.pop(ref_id, None)
+            self._pending_clears.pop(pending_key, None)
+            await message.reply(f"Yêu cầu xóa dữ liệu của {requester.mention} đã quá hạn rồi ạ.")
+            return
+
+        reply_text = message.content.strip()
+        if CLEAR_REJECT_RE.search(reply_text):
+            self._pending_clear_requests.pop(ref_id, None)
+            self._pending_clears.pop(pending_key, None)
+            await message.reply(f"Dạ rõ thưa Chỉ huy, em sẽ giữ nguyên tin nhắn và hồ sơ của {requester.mention} ạ.")
+            return
+
+        if CLEAR_APPROVE_RE.search(reply_text):
+            self._pending_clear_requests.pop(ref_id, None)
+            self._pending_clears.pop(pending_key, None)
+            await asyncio.to_thread(db.clear_history, session_id, str(requester.id))
+            await asyncio.to_thread(db.reset_user_memory, str(requester.id))
+            await message.reply(f"Dạ Chỉ huy, toàn bộ tin nhắn và hồ sơ ghi nhớ của {requester.mention} đã được xóa sạch khỏi hệ thống rồi ạ!")
+            return
+
+        await message.reply("Chỉ huy vui lòng reply `đồng ý` hoặc `không đồng ý` vào tin nhắn trên giúp em nhé ạ!")
 
     @commands.command(name='ask')
     async def ask(self, ctx, *, content: str):
@@ -486,9 +540,41 @@ class Chat(commands.Cog):
                 await asyncio.to_thread(db.reset_user_memory, str(ctx.author.id))
                 await ctx.reply("Em sẽ không quên chỉ huy đâu... Lịch sử trò chuyện của kênh và hồ sơ ký ức đã được làm mới hoàn toàn!")
         else:
-            await asyncio.to_thread(db.clear_history, session_id, str(ctx.author.id))
-            await asyncio.to_thread(db.reset_user_memory, str(ctx.author.id))
-            await ctx.reply(f"Dạ {ctx.author.display_name}, toàn bộ tin nhắn và hồ sơ ghi nhớ về bạn đã được xóa sạch khỏi hệ thống.")
+            pending_key = (session_id, ctx.author.id)
+            now = time.monotonic()
+            expired_ids = [mid for mid, info in self._pending_clear_requests.items() if now > info["expires_at"]]
+            for mid in expired_ids:
+                info = self._pending_clear_requests.pop(mid, None)
+                if info:
+                    self._pending_clears.pop((info["session_id"], info["requester"].id), None)
+
+            if pending_key in self._pending_clears and now <= self._pending_clears[pending_key]:
+                await ctx.reply("Yêu cầu xóa dữ liệu của bạn đang chờ Chỉ huy Kett xác nhận rồi ạ.")
+                return
+
+            if not ctx.guild:
+                await ctx.reply("Lệnh `!clear` cần Chỉ huy Kett xác nhận, bạn vui lòng dùng lệnh này trong kênh chat của server để em tag Chỉ huy nhé ạ.")
+                return
+
+            commander_mention = f"<@{self.commander_id}>" if self.commander_id else None
+            if not commander_mention:
+                for m in ctx.guild.members:
+                    if self._is_commander(m):
+                        commander_mention = m.mention
+                        break
+            commander_mention = commander_mention or "Chỉ huy Kett"
+
+            expires_at = now + 300
+            sent_msg = await ctx.reply(
+                f"{commander_mention}, thành viên {ctx.author.mention} muốn xóa toàn bộ tin nhắn và hồ sơ ghi nhớ của họ. Chỉ huy `đồng ý` hay `không đồng ý` ạ?",
+                allowed_mentions=discord.AllowedMentions(users=True, replied_user=True),
+            )
+            self._pending_clears[pending_key] = expires_at
+            self._pending_clear_requests[sent_msg.id] = {
+                "session_id": session_id,
+                "requester": ctx.author,
+                "expires_at": expires_at,
+            }
 
 
 async def setup(bot):
