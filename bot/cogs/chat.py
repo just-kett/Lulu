@@ -26,6 +26,7 @@ CLEAR_APPROVE_RE = re.compile(
     r'\b(?:đồng\s+ý|được|duyệt|ok|oke|okay|yes|ừ|ờ|approve)\b',
     re.IGNORECASE | re.UNICODE,
 )
+CLEAR_COOLDOWN_SECONDS = 3600
 
 
 class Chat(commands.Cog):
@@ -35,6 +36,7 @@ class Chat(commands.Cog):
         self.commander_id = COMMANDER_ID
         self._pending_clears: dict[tuple[str, int], float] = {}
         self._pending_clear_requests: dict[int, dict] = {}
+        self._clear_cooldowns: dict[int, float] = {}
 
     async def cog_load(self):
         await asyncio.to_thread(db.init_db)
@@ -556,6 +558,19 @@ class Chat(commands.Cog):
                 await ctx.reply("Lệnh `!clear` cần Chỉ huy Kett xác nhận, bạn vui lòng dùng lệnh này trong kênh chat của server để em tag Chỉ huy nhé ạ.")
                 return
 
+            cooldown_until = self._clear_cooldowns.get(ctx.author.id, 0)
+            if now < cooldown_until:
+                remaining = int(cooldown_until - now) + 1
+                mins, secs = divmod(remaining, 60)
+                if mins > 0:
+                    wait_str = f"{mins} phút {secs} giây" if secs else f"{mins} phút"
+                else:
+                    wait_str = f"{secs} giây"
+                await ctx.reply(
+                    f"Chỉ huy vui lòng chờ thêm {wait_str} trước khi gửi yêu cầu xóa dữ liệu tiếp theo ạ."
+                )
+                return
+
             commander_mention = f"<@{self.commander_id}>" if self.commander_id else None
             if not commander_mention:
                 for m in ctx.guild.members:
@@ -569,6 +584,7 @@ class Chat(commands.Cog):
                 f"{commander_mention}, thành viên {ctx.author.mention} muốn xóa toàn bộ tin nhắn và hồ sơ ghi nhớ của họ. Chỉ huy `đồng ý` hay `không đồng ý` ạ?",
                 allowed_mentions=discord.AllowedMentions(users=True, replied_user=True),
             )
+            self._clear_cooldowns[ctx.author.id] = now + CLEAR_COOLDOWN_SECONDS
             self._pending_clears[pending_key] = expires_at
             self._pending_clear_requests[sent_msg.id] = {
                 "session_id": session_id,
