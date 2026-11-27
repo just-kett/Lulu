@@ -514,6 +514,15 @@ class Chat(commands.Cog):
         is_cmd = self._is_commander(ctx.author)
 
         if is_cmd:
+            if extra.strip().lower() == "all":
+                msg_count, mem_count = await asyncio.to_thread(db.clear_all_memory_and_history)
+                self._pending_clears.clear()
+                self._pending_clear_requests.clear()
+                await ctx.reply(
+                    f"Dạ Chỉ huy, em đã xóa sạch toàn bộ dữ liệu trên toàn hệ thống ({msg_count} tin nhắn và {mem_count} hồ sơ ghi nhớ) rồi ạ!"
+                )
+                return
+
             valid_mentions = [m for m in ctx.message.mentions if m != self.bot.user]
             tokens = extra.strip().split()
             if not valid_mentions and tokens and tokens[0].isdigit() and len(tokens[0]) >= 15:

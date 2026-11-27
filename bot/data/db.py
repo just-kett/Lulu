@@ -380,6 +380,13 @@ def reset_user_memory(user_id: str) -> None:
         conn.execute("DELETE FROM user_memories WHERE user_id = %s", (user_id,))
 
 
+def clear_all_memory_and_history() -> tuple[int, int]:
+    with _db_conn() as conn:
+        msg_cur = conn.execute("DELETE FROM messages")
+        mem_cur = conn.execute("DELETE FROM user_memories")
+        return msg_cur.rowcount, mem_cur.rowcount
+
+
 def add_banned_item(
     guild_id: str,
     item_type: str,
